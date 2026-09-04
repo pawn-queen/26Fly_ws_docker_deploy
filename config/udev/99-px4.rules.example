@@ -1,0 +1,10 @@
+# Example only. Replace the serial value after inspecting the actual flight controller:
+#   udevadm info --attribute-walk --name=/dev/ttyACM1
+# Then install as /etc/udev/rules.d/99-px4.rules on the HOST, reload rules, and reconnect.
+# Never install udev rules only inside the container.
+
+# Pixhawk/PX4 native USB example. The placeholder prevents this template matching anything as-is.
+SUBSYSTEM=="tty", ATTRS{serial}=="REPLACE_WITH_FLIGHT_CONTROLLER_SERIAL", SYMLINK+="px4_fcu", GROUP="dialout", MODE="0660", TAG+="uaccess"
+
+# If an FTDI adapter is used, also constrain the rule by its actual serial number:
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="REPLACE_WITH_FTDI_SERIAL", SYMLINK+="px4_fcu", GROUP="dialout", MODE="0660", TAG+="uaccess"

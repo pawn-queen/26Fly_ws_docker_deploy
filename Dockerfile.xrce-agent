@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7
+
+FROM ubuntu:22.04 AS builder
+
+ARG XRCE_AGENT_VERSION=v2.4.2
+ARG FAST_DDS_GIT_TAG=v2.12.2
+ARG BUILD_JOBS=2
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --branch "${XRCE_AGENT_VERSION}" --depth 1 \
+        https://github.com/eProsima/Micro-XRCE-DDS-Agent.git /src/Micro-XRCE-DDS-Agent \
+    && grep -Fq 'set(_fastdds_tag 2.12.x)' /src/Micro-XRCE-DDS-Agent/CMakeLists.txt \
+    && sed -i "s/set(_fastdds_tag 2.12.x)/set(_fastdds_tag ${FAST_DDS_GIT_TAG})/" \
+        /src/Micro-XRCE-DDS-Agent/CMakeLists.txt \
+    && grep -Fq "set(_fastdds_tag ${FAST_DDS_GIT_TAG})" /src/Micro-XRCE-DDS-Agent/CMakeLists.txt \
+    && cmake -S /src/Micro-XRCE-DDS-Agent -B /src/Micro-XRCE-DDS-Agent/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUAGENT_BUILD_USAGE_EXAMPLES=OFF \
+        -DUAGENT_BUILD_TESTS=OFF \
+    && cmake --build /src/Micro-XRCE-DDS-Agent/build --parallel "${BUILD_JOBS}" \
+    && cmake --install /src/Micro-XRCE-DDS-Agent/build
+
+FROM ubuntu:22.04
+
+ARG XRCE_AGENT_VERSION=v2.4.2
+ARG FAST_DDS_GIT_TAG=v2.12.2
+
+LABEL org.opencontainers.image.title="26Fly Micro XRCE-DDS Agent" \
+      io.26fly.micro-xrce-dds-agent-version="${XRCE_AGENT_VERSION}" \
+      io.26fly.fast-dds-git-tag="${FAST_DDS_GIT_TAG}"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libatomic1 \
+        libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/ /usr/local/
+
+# This Agent intentionally returns 1 after printing help. Any loader failure returns a
+# different status, so this still detects missing shared libraries without false failure.
+RUN ldconfig \
+    && (MicroXRCEAgent --help >/dev/null 2>&1; test "$?" -eq 1)
+
+USER 65532:65532
+ENTRYPOINT ["MicroXRCEAgent"]
+CMD ["udp4", "-p", "8888"]

@@ -1,0 +1,9 @@
+.env
+.vscode/
+build/
+install/
+log/
+**/__pycache__/
+**/*.py[cod]
+models/*
+!models/README.md

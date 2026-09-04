@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.vscode
+build
+install
+log
+**/__pycache__
+**/*.py[cod]
+models/*.engine
+models/*.onnx
+models/*.pt
+models/*.torchscript
+models/*.trt
