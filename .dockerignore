@@ -5,10 +5,10 @@
 build
 install
 log
+config
+models
+scripts
+fly_*.sh
+初步方案.md
 **/__pycache__
 **/*.py[cod]
-models/*.engine
-models/*.onnx
-models/*.pt
-models/*.torchscript
-models/*.trt

@@ -1,0 +1,22 @@
+[Unit]
+Description=26Fly MAVLink Router
+Documentation=https://github.com/mavlink-router/mavlink-router
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionPathExists=/etc/26fly/runtime.env
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/run-mavlink-routerd
+Restart=always
+RestartSec=2
+TimeoutStartSec=0
+TimeoutStopSec=15
+KillSignal=SIGTERM
+SyslogIdentifier=26fly-mavlink-routerd
+StandardOutput=inherit
+StandardError=inherit
+
+[Install]
+WantedBy=26fly.target

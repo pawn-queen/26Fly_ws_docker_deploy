@@ -1,171 +1,186 @@
-# 26Fly Jetson Docker 部署
+# 26Fly Jetson 实机部署
 
-这套文件把“低频变化的运行环境”和“高频变化的 ROS 2/Python 源码”分开：
+本目录按 `初步方案.md` 实现为一个长期存在的 `26fly-runtime` 宠物容器。这里的 systemd 明确是**容器内 systemd**：镜像以 `/sbin/init` 作为 PID 1，负责初始化、监督和重启 Micro XRCE-DDS Agent 与 mavlink-routerd；Jetson 宿主 systemd 不安装本项目的服务单元，只负责正常启动 Docker Engine。
 
 ```text
-Jetson host
-/home/queen/uav/26Season_Fly_ws_archive/src  (Git + VS Code)
-                         │ read-only bind mount，修改即时可见
-                         ▼
-container /workspace/src
-          /workspace/build    named volume
-          /workspace/install  named volume
-          /workspace/log      named volume
+Jetson Ubuntu 22.04 host
+├── Jetson Linux/BSP、Kernel、NVIDIA Driver、JetPack、udev
+├── Docker Engine
+├── /home/queen/uav/26Season_Fly_ws_archive/src  (Git + VS Code)
+└── docker start 26fly-runtime
+        │
+        ▼
+26fly-runtime
+├── PID 1: /sbin/init --unit=26fly.target
+├── container systemd
+│   ├── micro-xrce-agent.service   Restart=always
+│   └── mavlink-routerd.service    Restart=always
+├── ROS 2 Humble + rmw_fastrtps_cpp
+├── CUDA/TensorRT/PyTorch/YOLO/OpenCV/RealSense userspace
+└── /workspace
+    ├── src       host read-only bind mount
+    ├── build     Docker named volume
+    ├── install   Docker named volume
+    └── log       Docker named volume
 ```
-
-源码挂载为只读并不影响热更新：宿主上的修改仍立即出现在容器中，只是容器不能反向制造 root 所有者的源码文件。`colcon build --symlink-install` 后，已有 Python 模块内容的修改通常无需再次构建。修改 `setup.py`、`package.xml`、入口点、新增模块、C/C++ 或 ROS 消息时仍需重建 workspace。
 
 ## 设计边界
 
-宿主保留 Jetson Linux/BSP、内核与固件、NVIDIA 驱动、NVIDIA Container Runtime、Docker、udev 规则、时间同步和必要的相机守护进程。镜像保存 ROS 2 Humble、编译工具、Python 科学计算依赖、RealSense 用户态包及 Jetson 版 PyTorch/Ultralytics/OpenCV。Dockerfile **没有**安装 BSP、内核驱动或 DKMS。
+- 只有一个长期存在的 runtime 容器；不采用一节点一容器，也不使用 Compose 管理 ROS 节点。
+- 日常生命周期是 `docker start`、`docker stop`、`docker exec`。同名容器存在时，创建脚本拒绝自动删除或 recreate。
+- 容器按方案使用 root、`--privileged` 和 `/dev:/dev`，动态出现的 UART、USB、video、media 节点对既有容器立即可见。
+- 源码只读挂载到 `/workspace/src`，宿主保存修改后容器立即可见。root 产生的 build/install/log 只写入 named volume。
+- systemd 只负责两个长期通信服务。RealSense、detect 和 control 是人工启动的任务进程，不属于 systemd。
+- control 永不随容器或 Jetson 开机启动；任务退出不会停止容器、Agent 或 mavlink-router。
+- Jetson BSP、内核模块、GPU 驱动和宿主 udev 不进入镜像。
+- 禁止执行 `chmod -R 777 /dev`。
 
-应用镜像固定为 `ultralytics/ultralytics:8.4.138-jetson-jetpack6`。它解决 Jetson ARM64 上 PyTorch/TensorRT 的组合；Dockerfile 不再安装通用 PyPI `torch`、`torchvision` 或 `ultralytics`。基础镜像上游目前允许较新的 `opencv-python-headless`，因此本项目会将它显式固定为 `4.11.0.86`，与 NumPy `1.24.3` 和 ROS Humble `cv_bridge` 一起做转换自检，避免 NumPy 2 ABI 混用。若要求字节级复现，应在验证后把 `BASE_IMAGE` 从 tag 改成仓库 digest，并使用固定 Ubuntu/ROS apt snapshot；仅靠 tag 和普通 apt 仓库无法保证未来每个 `.deb` 字节完全相同。
+由于容器同时使用 systemd、privileged 和宿主 `/dev`，镜像启动的是最小 `26fly.target`，不会进入普通 `multi-user.target`。镜像还屏蔽了容器内 udev、内核模块加载、sysctl 和 `/dev` tmpfiles 单元，避免它们与宿主硬件管理发生冲突。容器使用独立 PID namespace 和 private cgroup namespace；`/run`、`/run/lock` 是 tmpfs。该模式仍不是安全隔离边界，只应用于受控 Jetson 和可信飞行网络。
 
-JetPack 6.2.3 的宿主是 L4T 36.5.2，而当前公开 Jetson 基础镜像仍可能基于 r36.4.x。它们属于同一 r36 系列，但这不是“精确同版”，所以下面的 CUDA、相机、GStreamer、TensorRT 检查必须在目标机完成，不能用本机 x86/WSL 的结果代替。
-
-## 1. 宿主准备
-
-建议刷写并固定 JetPack 6 生产版本，然后仅在宿主配置 Docker 与 NVIDIA runtime。按 NVIDIA 当前 Jetson 文档安装/配置后，至少确认：
-
-```bash
-docker compose version
-docker info --format '{{json .Runtimes}}'
-```
-
-第二条输出必须包含 `nvidia`。若 runtime 尚未配置，典型流程是安装 NVIDIA Container Toolkit/Jetson 的 `nvidia-container` 包，然后执行：
-
-```bash
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-```
-
-不要把宿主 `/dev` 整体映射给容器，也不要使用 `privileged: true`。Compose 只给 RealSense USB 总线、指定广角相机和指定 PX4 串口。RealSense 的 cgroup 放行不能替代 Unix 文件权限：宿主还必须安装/验证官方 `librealsense2-udev-rules`（通常为 `99-realsense-libusb.rules`），并确认当前 UID 通过 `plugdev`/`video` 组可读写相机节点；只把规则装在容器里无效。
-
-当前 `control` profile 只支持源码现有的“单个 V4L2 `/dev/videoN` + `cv2.VideoCapture`”路径。若 IMX577 实际依赖 Jetson CSI/Argus/GStreamer，还需先修改/验证采集代码，再按需最小化挂载 `/tmp/argus_socket`、对应 `/dev/media*` 等节点；本配置不会假装 V4L2 与 Argus 可以互换。
-
-官方资料：
-
-- [JetPack 6.2.3](https://developer.nvidia.com/embedded/jetpack-sdk-623)
-- [Jetson Orin Nano 的 Docker 设置](https://docs.nvidia.com/jetson/orin-nano-devkit/user-guide/latest/setup_docker.html)
-- [Ultralytics JetPack 6 Dockerfile](https://github.com/ultralytics/ultralytics/blob/main/docker/Dockerfile-jetson-jetpack6)
-- [ROS 2 Humble 支持平台](https://docs.ros.org/en/humble/Releases/Release-Humble-Hawksbill.html)
-
-## 2. 检查本机参数
-
-目录已经带有适配当前路径的 `.env`。把目录复制到另一台 Jetson 后执行：
+## 1. 配置宿主路径与硬件
 
 ```bash
 cd /home/queen/uav/26Fly_ws_docker_deploy
 ./scripts/init-env.sh --force
+```
+
+`.env` 只保存镜像名、容器名、宿主路径和 volume 前缀，这些值参与 `docker create`。`config/runtime.env` 只读挂载到容器 `/etc/26fly`，每次服务或人工任务启动时重新读取，因此修改串口、topic、模型和 ROS domain 后不需要 recreate 容器。
+
+XRCE 与 MAVLink 必须使用不同的物理 FCU 链路。默认配置优先选择稳定 udev 链接，并仅把历史设备号作为候选：
+
+```bash
+XRCE_SERIAL_DEVICE=/dev/px4_xrce
+XRCE_SERIAL_CANDIDATES="/dev/ttyACM1"
+MAVLINK_SERIAL_DEVICE=/dev/px4_mavlink
+MAVLINK_SERIAL_CANDIDATES="/dev/ttyACM0"
+```
+
+根据 `config/udev/99-px4.rules.example` 在宿主建立两个稳定链接。若实际只有一个串口，不得让两个服务同时打开它；应把其中一个链路改成 UDP，或增加独立 UART/USB 链路。不要用宽泛的 `/dev/tty*` 自动打开未知设备。
+
+检查 Jetson、Docker/NVIDIA runtime、cgroup v2、源码和硬件配置：
+
+```bash
 ./scripts/check-host.sh
 ```
 
-然后检查 `.env` 中的源码、模型、相机和串口路径。`WIDE_CAMERA_DEVICE` 目前应填写 `v4l2-ctl --list-devices` 显示的原始 `/dev/videoN`，因为现有 Python 代码仍按该路径查找。文件名中下划线不需要反斜杠；正确路径就是：
+## 2. 首次 build、create 和 workspace 初始化
+
+```bash
+./scripts/build-image.sh
+./scripts/create-runtime.sh
+./scripts/start-runtime.sh
+./scripts/build-workspace.sh
+./scripts/verify-runtime.sh
+```
+
+`create-runtime.sh` 创建：
+
+- `26fly-runtime`，镜像入口为 `/sbin/init`，PID 1 是容器内 systemd；
+- `--restart unless-stopped`、NVIDIA runtime、host network、host IPC；
+- root、`--privileged`、`/dev:/dev`、`--cgroupns private`；
+- `/run` 与 `/run/lock` tmpfs；
+- `${VOLUME_PREFIX}-build`、`${VOLUME_PREFIX}-install`、`${VOLUME_PREFIX}-log`。
+
+如宿主存在 `/run/udev` 或 `/tmp/argus_socket`，创建脚本会额外挂载它们；不存在时不会在宿主制造空路径。
+
+只有 Dockerfile、apt/requirements、systemd unit 或底层 ABI 改变时才构建新镜像，并进行一次明确的容器迁移。源码和 `config/runtime.env` 的日常变化不需要重建镜像。
+
+如果目标 Jetson 已经用错误的旧入口创建过同名容器，仅重新 build 镜像不会改变既有容器的 PID 1。先保留式迁移旧容器，再创建新的：
+
+```bash
+docker stop 26fly-runtime
+docker rename 26fly-runtime 26fly-runtime-pre-pid1-systemd
+./scripts/create-runtime.sh
+./scripts/start-runtime.sh
+```
+
+三个 named volume 会继续复用；确认新版稳定前不要删除备份容器。
+
+## 3. 操作容器内 systemd
+
+容器启动时 systemd 自动启动两个基础通信服务。宿主包装脚本内部执行的是 `docker exec 26fly-runtime systemctl ...`：
+
+```bash
+./scripts/systemctl.sh status micro-xrce-agent mavlink-routerd
+./scripts/systemctl.sh restart micro-xrce-agent mavlink-routerd
+./scripts/logs.sh --tail 200 -f
+```
+
+也可以进入容器后直接操作：
+
+```bash
+./scripts/shell.sh
+systemctl status micro-xrce-agent
+systemctl status mavlink-routerd
+```
+
+这两条 `systemctl` 命令连接的是容器 PID 1，而不是宿主 systemd。最小 target 不启动 journald；两个服务继承 PID 1 的 stdout/stderr，由 `docker logs` 统一收集。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
+
+Micro XRCE-DDS Agent v2.4.2 在同一个镜像中以 `UAGENT_USE_SYSTEM_FASTDDS=ON` 构建，直接链接 ROS Humble 的 Fast DDS 2.6/Fast CDR，避免 Agent 引入另一套 DDS 动态库。mavlink-router 固定为 v4。
+
+## 4. 日常开发和人工任务
+
+宿主修改：
 
 ```text
-/home/queen/uav/26Season_Fly_ws_archive/src
+/home/queen/uav/26Season_Fly_ws_archive/src/...
 ```
 
-如 PX4 通过串口连接，推荐用 `config/udev/99-px4.rules.example` 在宿主建立 `/dev/px4_fcu`，再设置 `PX4_SERIAL_DEVICE=/dev/px4_fcu`。udev 规则属于宿主，而不是镜像。
-
-## 3. 构建镜像和 workspace
-
-首次操作：
+容器 `/workspace/src/...` 会立即看到相同内容。Python 包使用：
 
 ```bash
-cd /home/queen/uav/26Fly_ws_docker_deploy
-docker compose build workspace
-docker compose run --rm workspace build-workspace
-docker compose run --rm workspace verify-runtime
+./scripts/build-workspace.sh
 ```
 
-Orin Nano 8 GB 默认使用顺序 colcon executor，单个 CMake 构建最多 2 个 job，避免编译与统一内存争用。当前实机节点只需要：
+即 `colcon build --symlink-install`。普通 Python 函数修改通常只需重启任务；修改 `setup.py`、`package.xml`、入口点、消息接口、新增模块或 C/C++ 时需要重新 build workspace。
 
-```text
-px4_msgs detect control
-```
-
-`px4_ros_com` 没有被这两个节点 import，所以默认不构建。若确有需要，在 `.env` 的 `COLCON_PACKAGES` 后追加它并重新执行 `build-workspace`。
-
-日常进入环境：
+RealSense 和实机检测在不同终端人工运行：
 
 ```bash
-docker compose up -d workspace
-docker compose exec workspace bash
+./scripts/run-camera.sh
+./scripts/run-detect.sh
 ```
 
-在宿主 VS Code 中保存源码后，容器 `/workspace/src` 立刻变化。普通 Python 函数修改直接重启对应进程；涉及包元数据或生成代码时重新执行 `docker compose run --rm workspace build-workspace`。只有 Dockerfile、apt 清单或 requirements 变化才需要 `docker compose build`。
+检测入口固定为 `ros2 run detect detect`，不会启动 `detect_ros_sim_lowHZ.py`。整个 `src` 是单一 bind mount，因此仿真源码仍然可见，但部署脚本不会调用它。
 
-## 4. 实机服务
-
-RealSense 与检测：
+真实控制必须由操作员逐次授权：
 
 ```bash
-docker compose --profile camera --profile detect up realsense detect
+ALLOW_FLIGHT_CONTROL=YES ./fly_A.sh
 ```
 
-默认检测入口是 `ros2 run detect detect`，明确不会调用仿真的 `detect_ros_sim_lowHZ.py`。
+任务前台运行 `control/0821auto.py`；进程退出表示任务结束，systemd 管理的两个通信服务和容器继续运行。许可只传给本次 `docker exec`，`config/runtime.env` 永久保持 `ALLOW_FLIGHT_CONTROL=NO`。
 
-PX4 使用 UDP Agent：
+停止和恢复整个运行环境：
 
 ```bash
-docker compose --profile px4-udp up xrce-agent-udp
+./scripts/stop-runtime.sh
+./scripts/start-runtime.sh
 ```
 
-PX4 使用串口 Agent（当前历史配置为 `/dev/ttyACM1`、921600）：
+`docker stop` 向 PID 1 发送 systemd 的退出信号，systemd 先停止服务再退出。容器和三个 named volume 均保留。
 
-```bash
-docker compose --profile px4-serial up xrce-agent-serial
-```
+## 5. 当前实机阻断项
 
-Agent 固定为 PX4/Humble 对应的 Micro XRCE-DDS Agent v2.4.2，并放在独立小镜像，避免它自带的 Fast DDS 库污染 ROS 应用镜像。v2.4.2 上游 CMake 曾指向现已不可解析的浮动分支 `2.12.x`，Dockerfile 会严格确认该行并改为不可变的 Fast-DDS tag `v2.12.2`；若上游源码布局变化则构建直接失败，不会静默使用别的版本。`ROS_DOMAIN_ID` 必须与 PX4 参数 `UXRCE_DDS_DOM_ID` 相等，默认均为 0。参考 [PX4 uXRCE-DDS 文档](https://docs.px4.io/main/en/middleware/uxrce_dds) 和 [eProsima Agent 源码构建文档](https://micro-xrce-dds.docs.eprosima.com/en/stable/installation.html)。
+部署层不会修改 Git 管理的飞控源码。当前仍需处理：
 
-控制节点具备实际解锁/飞行/投放能力，因此默认双重拒绝启动。解决下一节的源码问题、拆桨台架验证后，再临时执行：
+1. `fly/setup.py` 只有仿真入口，因此脚本暂时显式调用 `control.0821auto`。
+2. `0821auto.py` 调用了当前不存在的 `ServoControl.publish_dual_actuator_command()`；控制脚本会在起飞前拒绝运行。
+3. 当前 PX4 status subscription QoS 与历史实机代码不同，必须在拆桨台架上用实际 publisher QoS 验证。
+4. `detect/package.xml` 含无效 `test_interface`，`fly/package.xml` 错列 Python 标准库；因此依赖暂以审查过的 apt/pip 清单为主。
+5. 当前 `px4_msgs` 显示为 1.17.0，而开发中的固件树是 PX4 1.15.4；实飞前必须确认消息定义与固件构建来源一致。
 
-```bash
-ALLOW_FLIGHT_CONTROL=YES docker compose --profile control up control
-```
+以上问题不会被容器或 systemd 掩盖，控制入口保持 fail-closed。
 
-不要把 `ALLOW_FLIGHT_CONTROL=YES` 长期写进提交的配置。控制服务不会自动无限重启。启动脚本会校验两个 PX4 topic 的名称、消息类型，并实际等待一帧与控制代码相同 QoS 的数据；这仍然不能证明估计值正确、飞行模式正确或飞机安全。实飞前还要人工检查 `ros2 topic info -v`、消息数值、EKF/解锁状态、failsafe、急停和桨叶安全。
+## 6. 资源和版本
 
-## 5. 当前源码已确认的问题
+Orin Nano 8 GB 默认采用顺序 colcon executor、两个原生编译 job、headless 和关闭录像。`.pt` 可先用于功能验证；TensorRT `.engine` 应在目标 Orin Nano、当前 JetPack/CUDA/TensorRT 镜像中生成。
 
-这些不是 Docker 问题，镜像也不应该悄悄篡改飞控源码：
+基础镜像 tag、Agent v2.4.2、mavlink-router v4 和 Python wheel 已固定。Ubuntu/ROS apt 仓库仍会滚动更新；若需要字节级复现，应继续固定基础镜像 digest 并使用经过验证的 apt snapshot。切换 JetPack、ROS/Python ABI、PX4 消息版本或大型分支时应更换 `VOLUME_PREFIX`。
 
-1. `fly/setup.py` 只注册了仿真入口 `control.sim.0707:main`，没有真实控制入口。部署脚本因此明确运行 `/workspace/src/fly/control/0821auto.py`。
-2. `0821auto.py` 调用了 8 次 `ServoControl.publish_dual_actuator_command()`，但当前 `ServoControl.py` 没有这个方法。`run-control` 会在起飞前拒绝启动，而不是等到投放阶段才崩溃。
-3. 当前 `ServoControl` 对 PX4 status 使用 `RELIABLE` 订阅，历史实机代码使用 `BEST_EFFORT`；应按实际 `/fmu/out` publisher QoS 核对。
-4. `detect/package.xml` 声明了不存在的 `test_interface`，并漏写部分真实依赖；`fly/package.xml` 把 Python 标准库 `math`、`time`、`collections` 错列成 ROS 依赖。因此首版镜像使用显式 apt/pip 清单，`check-rosdep` 暂时跳过这些无效 key。
-5. `px4_msgs` 必须固定到与实际 PX4 固件兼容的 release/commit。当前源码版本是 1.17.0，刷机前要再次确认消息版本。
+参考：
 
-目前整个 `src` 按要求做单一 bind mount，所以 `control/sim/` 和 `detect_ros_sim_lowHZ.py` 仍会在容器文件系统中“可见”，而且 ament_python 仍可能安装它们；它们不会被实机 Compose 调用。在子目录放 `COLCON_IGNORE` 无法排除同一个 Python package 内的模块。若要求镜像中完全不可见，正确做法是以后把 real/sim 拆成独立 ROS package，而不是在部署层复制并修改开发源码。
-
-## 6. 模型、日志与卷生命周期
-
-`.pt` 可先验证功能，但 Orin 8 GB 实飞建议 batch=1、headless、默认关闭录像，并使用在目标 Jetson/目标 TensorRT 栈上生成的 FP16 `.engine`。参见 `models/README.md`。
-
-查看 named volume：
-
-```bash
-docker volume ls | grep 26fly
-docker compose exec workspace du -sh /workspace/build /workspace/install /workspace/log
-```
-
-切换 JetPack、ROS/Python ABI、PX4 消息版本或大型 Git 分支时，不要盲用旧 build/install。最安全的方式是先修改 `.env` 的 `VOLUME_PREFIX`，创建一套新卷。`docker compose down` 默认保留 named volume；`docker compose down -v` 会删除编译产物和日志，只能在确认无需保留后使用。
-
-换到 UID/GID 不同的 Jetson 时同样应先运行 `init-env.sh --force`、重新 build 镜像，并换一个新的 `VOLUME_PREFIX`。已存在 named volume 的所有者不会因为修改 `.env` 自动变化，直接复用可能产生 `Permission denied`。
-
-建议把 Docker data-root 和录像放在 NVMe。不要对应用容器设置激进的 `mem_limit`：Orin 的 CPU/GPU 共用 8 GB 内存，限制 batch、队列、录像和编译并行度更有效。
-
-所有 ROS 服务使用 host network，DDS 发现和 UDP Agent 端口会进入宿主网络。飞行网络应视为受信网络，并在 Jetson 防火墙/交换网络上限制不需要的接口和来源；不要把 DDS/8888 直接暴露到公共或不可信 Wi-Fi。
-
-## 7. rosdep 的使用边界
-
-当前 package manifests 尚不可靠，所以镜像构建以 `apt-packages.txt` 和 `requirements.txt` 为准。修正 manifests 后可执行：
-
-```bash
-docker compose run --rm workspace rosdep update --rosdistro humble
-docker compose run --rm workspace check-rosdep
-```
-
-不要直接对当前树无审查地运行 `rosdep install`。另外，当前打开的 `src/px4_msgs/.dockerignore` 对本方案没有作用：Docker build context 是本部署目录，源码通过运行时 bind mount 进入容器，从未 COPY 到镜像中。
+- [systemd Container Interface](https://systemd.io/CONTAINER_INTERFACE/)
+- [Docker container run reference](https://docs.docker.com/reference/cli/docker/container/run/)
+- [PX4 uXRCE-DDS version selection](https://docs.px4.io/main/en/middleware/uxrce_dds#version-selection)
+- [mavlink-router](https://github.com/mavlink-router/mavlink-router)

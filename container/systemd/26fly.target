@@ -1,0 +1,6 @@
+[Unit]
+Description=26Fly minimal container target
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+AllowIsolate=yes

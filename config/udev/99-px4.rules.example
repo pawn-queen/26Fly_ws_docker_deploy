@@ -1,10 +1,14 @@
-# Example only. Replace the serial value after inspecting the actual flight controller:
-#   udevadm info --attribute-walk --name=/dev/ttyACM1
-# Then install as /etc/udev/rules.d/99-px4.rules on the HOST, reload rules, and reconnect.
-# Never install udev rules only inside the container.
+# HOST-ONLY example. Inspect each physical serial adapter first:
+#   udevadm info --attribute-walk --name=/dev/ttyACM0
+# Replace both placeholders, install this file under /etc/udev/rules.d on the
+# Jetson host, reload udev, and reconnect the devices. Never install it only in
+# the container and never use chmod -R 777 /dev.
 
-# Pixhawk/PX4 native USB example. The placeholder prevents this template matching anything as-is.
-SUBSYSTEM=="tty", ATTRS{serial}=="REPLACE_WITH_FLIGHT_CONTROLLER_SERIAL", SYMLINK+="px4_fcu", GROUP="dialout", MODE="0660", TAG+="uaccess"
+# XRCE and MAVLink cannot open the same serial interface. In a real installation
+# these normally represent two independent FCU links/adapters.
+SUBSYSTEM=="tty", ATTRS{serial}=="REPLACE_WITH_XRCE_LINK_SERIAL", SYMLINK+="px4_xrce", GROUP="dialout", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{serial}=="REPLACE_WITH_MAVLINK_LINK_SERIAL", SYMLINK+="px4_mavlink", GROUP="dialout", MODE="0660", TAG+="uaccess"
 
-# If an FTDI adapter is used, also constrain the rule by its actual serial number:
-# SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="REPLACE_WITH_FTDI_SERIAL", SYMLINK+="px4_fcu", GROUP="dialout", MODE="0660", TAG+="uaccess"
+# Then set in config/runtime.env:
+# XRCE_SERIAL_DEVICE=/dev/px4_xrce
+# MAVLINK_SERIAL_DEVICE=/dev/px4_mavlink

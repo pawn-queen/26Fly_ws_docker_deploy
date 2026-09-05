@@ -1,0 +1,22 @@
+[Unit]
+Description=26Fly Micro XRCE-DDS Agent
+Documentation=https://docs.px4.io/main/en/middleware/uxrce_dds
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionPathExists=/etc/26fly/runtime.env
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/run-micro-xrce-agent
+Restart=always
+RestartSec=2
+TimeoutStartSec=0
+TimeoutStopSec=15
+KillSignal=SIGTERM
+SyslogIdentifier=26fly-xrce-agent
+StandardOutput=inherit
+StandardError=inherit
+
+[Install]
+WantedBy=26fly.target
