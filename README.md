@@ -165,10 +165,8 @@ ALLOW_FLIGHT_CONTROL=YES ./fly_A.sh
 部署层不会修改 Git 管理的飞控源码。当前仍需处理：
 
 1. `fly/setup.py` 只有仿真入口，因此脚本暂时显式调用 `control.0821auto`。
-2. `0821auto.py` 调用了当前不存在的 `ServoControl.publish_dual_actuator_command()`；控制脚本会在起飞前拒绝运行。
-3. 当前 PX4 status subscription QoS 与历史实机代码不同，必须在拆桨台架上用实际 publisher QoS 验证。
-4. `detect/package.xml` 含无效 `test_interface`，`fly/package.xml` 错列 Python 标准库；因此依赖暂以审查过的 apt/pip 清单为主。
-5. 当前 `px4_msgs` 显示为 1.17.0，而开发中的固件树是 PX4 1.15.4；实飞前必须确认消息定义与固件构建来源一致。
+2. 当前 PX4 status subscription QoS 与历史实机代码不同，必须在拆桨台架上用实际 publisher QoS 验证。
+3. `detect/package.xml` 含无效 `test_interface`，`fly/package.xml` 错列 Python 标准库；因此依赖暂以审查过的 apt/pip 清单为主。
 
 以上问题不会被容器或 systemd 掩盖，控制入口保持 fail-closed。
 
