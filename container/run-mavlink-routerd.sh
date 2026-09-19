@@ -28,7 +28,7 @@ case "${transport}" in
         device="$(resolve-device \
             MAVLink \
             "${MAVLINK_SERIAL_DEVICE:-auto}" \
-            "${MAVLINK_SERIAL_CANDIDATES:-/dev/ttyACM0}" \
+            "${MAVLINK_SERIAL_CANDIDATES:-}" \
             "${xrce_device}")"
         echo "Starting mavlink-routerd on ${device} at ${MAVLINK_BAUD:-921600}." >&2
         exec mavlink-routerd "${args[@]}" "${device}:${MAVLINK_BAUD:-921600}"

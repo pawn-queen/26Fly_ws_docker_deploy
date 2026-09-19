@@ -9,9 +9,13 @@ if [[ ! -f /workspace/install/local_setup.bash ]]; then
     exit 2
 fi
 
-model="${DETECT_MODEL:-/workspace/src/detect/models/26n_0807_bright_needle.pt}"
+model="${DETECT_MODEL:-/workspace/src/detect/models/26fly_jetson.engine}"
 if [[ ! -r "${model}" ]]; then
     echo "ERROR: detection model is not readable: ${model}" >&2
+    exit 2
+fi
+if [[ "${model}" != *.engine ]]; then
+    echo "ERROR: detection model must be a Jetson TensorRT .engine file: ${model}" >&2
     exit 2
 fi
 if ! ros2 pkg prefix detect >/dev/null 2>&1; then

@@ -2,6 +2,7 @@
 
 DEPLOY_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 DOTENV_FILE="${DEPLOY_DIR}/.env"
+DEFAULT_HOST_WS_SRC="$(dirname -- "${DEPLOY_DIR}")/26Season_Fly_ws_jetson/src"
 
 dotenv_value() {
     local key=$1
@@ -30,12 +31,15 @@ load_runtime_settings() {
 
     CONTAINER_NAME="$(dotenv_value CONTAINER_NAME 26fly-runtime)"
     APP_IMAGE="$(dotenv_value APP_IMAGE 26fly-jetson:jp6-humble-ultralytics-8.4.138)"
-    HOST_WS_SRC="$(dotenv_value HOST_WS_SRC /home/queen/uav/26Season_Fly_ws_archive/src)"
+    HOST_WS_SRC="$(dotenv_value HOST_WS_SRC "${DEFAULT_HOST_WS_SRC}")"
     HOST_MODEL_DIR="$(dotenv_value HOST_MODEL_DIR "${DEPLOY_DIR}/models")"
     HOST_CONFIG_DIR="$(dotenv_value HOST_CONFIG_DIR "${DEPLOY_DIR}/config")"
-    VOLUME_PREFIX="$(dotenv_value VOLUME_PREFIX 26fly-jp6-humble)"
+    VOLUME_PREFIX="$(dotenv_value VOLUME_PREFIX 26fly-jp6-humble-px4-1.17)"
     BUILD_JOBS="$(dotenv_value BUILD_JOBS 2)"
+    PX4_MSGS_REPOSITORY="$(dotenv_value PX4_MSGS_REPOSITORY https://github.com/PX4/px4_msgs.git)"
+    PX4_MSGS_REF="$(dotenv_value PX4_MSGS_REF v1.17.0)"
     export CONTAINER_NAME APP_IMAGE HOST_WS_SRC HOST_MODEL_DIR HOST_CONFIG_DIR VOLUME_PREFIX BUILD_JOBS
+    export PX4_MSGS_REPOSITORY PX4_MSGS_REF
 }
 
 require_command() {

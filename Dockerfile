@@ -116,7 +116,9 @@ RUN mkdir -p \
         /workspace/log/detect/videos \
         /workspace/models \
         /home/kpc \
+        /home/pixel \
     && ln -s /workspace/log/control/csv /home/kpc/flylogs \
+    && ln -s /workspace/log/control/csv /home/pixel/flylogs \
     && ln -s /workspace/log/detect/videos /home/depth_videos \
     && ln -s /workspace/log/control/photos /home/image_recodes \
     && ln -s /workspace/log/control/videos /home/video_recodes \

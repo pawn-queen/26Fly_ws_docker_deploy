@@ -9,6 +9,7 @@
 SUBSYSTEM=="tty", ATTRS{serial}=="REPLACE_WITH_XRCE_LINK_SERIAL", SYMLINK+="px4_xrce", GROUP="dialout", MODE="0660", TAG+="uaccess"
 SUBSYSTEM=="tty", ATTRS{serial}=="REPLACE_WITH_MAVLINK_LINK_SERIAL", SYMLINK+="px4_mavlink", GROUP="dialout", MODE="0660", TAG+="uaccess"
 
-# Then set in config/runtime.env:
+# Only use these custom names if /dev/serial/by-id is unavailable. Then set in
+# config/runtime.env instead of the current by-id paths:
 # XRCE_SERIAL_DEVICE=/dev/px4_xrce
 # MAVLINK_SERIAL_DEVICE=/dev/px4_mavlink

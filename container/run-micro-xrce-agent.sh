@@ -23,7 +23,7 @@ case "${transport}" in
         device="$(resolve-device \
             XRCE \
             "${XRCE_SERIAL_DEVICE:-auto}" \
-            "${XRCE_SERIAL_CANDIDATES:-/dev/ttyACM1}" \
+            "${XRCE_SERIAL_CANDIDATES:-}" \
             "${mavlink_device}")"
         echo "Starting Micro XRCE-DDS Agent on ${device} at ${XRCE_BAUD:-921600}." >&2
         exec MicroXRCEAgent serial --dev "${device}" -b "${XRCE_BAUD:-921600}" "${verbosity_args[@]}"
