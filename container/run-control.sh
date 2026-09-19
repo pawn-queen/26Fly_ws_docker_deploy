@@ -29,7 +29,7 @@ fi
 
 control_main=/workspace/src/fly/control/0821auto.py
 servo_source=/workspace/src/fly/control/ServoControl.py
-model="${CONTROL_MODEL:-/workspace/src/detect/models/26fly_jetson.engine}"
+model="${CONTROL_MODEL:-/workspace/src/fly/models/26fly_jetson.engine}"
 camera_device="${WIDE_CAMERA_DEVICE:-/dev/video0}"
 
 for required in "${control_main}" "${servo_source}" "${model}"; do

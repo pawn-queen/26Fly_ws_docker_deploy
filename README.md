@@ -46,13 +46,14 @@ cd /home/<user>/uav/26Fly_ws_docker_deploy
 
 初始化脚本按两个仓库位于同一 `uav` 目录的布局，自动把 `HOST_WS_SRC` 指向相邻的 `26Season_Fly_ws_jetson/src`，因此不依赖用户名。`.env` 保存镜像名、容器名、宿主路径、固定的 `px4_msgs` 来源和 volume 前缀；其中宿主路径和 volume 前缀在 `docker create` 时确定，`px4_msgs` 来源供初始化脚本使用。`config/runtime.env` 只读挂载到容器 `/etc/26fly`，每次服务或人工任务启动时重新读取，因此修改串口、topic、模型和 ROS domain 后不需要 recreate 容器。
 
-Jetson TensorRT 模型由源码仓库同步，默认文件名为：
+Jetson TensorRT 模型由源码仓库同步，detect 与 control 分别从各自包的模型目录读取：
 
 ```text
-26Season_Fly_ws_jetson/src/detect/models/26fly_jetson.engine
+26Season_Fly_ws_jetson/src/detect/models/26fly_jetson.engine  # detect
+26Season_Fly_ws_jetson/src/fly/models/26fly_jetson.engine     # control
 ```
 
-该文件必须先在源码仓库中提交并推送；`check-host.sh` 会拒绝源码仓库存在未提交/未推送内容，以及模型缺失、非 `.engine`、未被 Git 跟踪或与当前提交不一致。模型和代码 `git pull` 后，既有容器会立即看到只读 bind mount 的新内容；重启相应任务进程即可加载，不需要 recreate。
+两个文件必须分别在源码仓库中提交并推送；`check-host.sh` 会拒绝源码仓库存在未提交/未推送内容，以及任一模型缺失、非 `.engine`、未被 Git 跟踪或与当前提交不一致。模型和代码 `git pull` 后，既有容器会立即看到只读 bind mount 的新内容；重启相应任务进程即可加载，不需要 recreate。
 
 `px4_msgs` 不复制进主源码仓库历史，而是在其 `src` 下作为固定 tag 的独立 checkout 初始化：
 
@@ -191,7 +192,7 @@ ALLOW_FLIGHT_CONTROL=YES ./fly_A.sh
 
 部署层不会修改 Git 管理的飞控源码。当前仍需处理：
 
-1. `26fly_jetson.engine` 当前必须由操作者放入 Jetson 源码仓库并提交；缺失时预检会失败。
+1. detect/control 的 `26fly_jetson.engine` 当前必须分别放入各自的 `src/detect/models`、`src/fly/models` 并提交；任一缺失时预检都会失败。
 2. 控制入口会检查 PX4 topic/sample、RealSense 三条输入流和 `yolov5_ros2` publisher；`vehicle_command_ack` 的实际命令结果和三条 `/fmu/in/*` reader 身份仍必须在拆桨台架上验证。
 3. `detect/package.xml` 含无效 `test_interface`，`fly/package.xml` 错列 Python 标准库；因此依赖暂以审查过的 apt/pip 清单为主。
 4. 控制程序会在人工授权启动后自动请求 Offboard、解锁和起飞；回调异常处理、舵机数值/方向以及相机内外参必须在上桨前完成 fail-safe 与台架验证。
