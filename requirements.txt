@@ -2,7 +2,8 @@
 # torch, torchvision and ultralytics belong to the pinned Jetson base image.
 # OpenCV is held at the final NumPy-1-compatible headless wheel so ROS Humble's
 # cv_bridge and this workspace's NumPy 1.24 ABI are not mixed with a NumPy-2-only wheel.
-numpy==1.24.3
+numpy==1.26.4
 scipy==1.10.1
 opencv-python-headless==4.11.0.86
 lap==0.5.12
+setuptools>=30.3.0,<80
