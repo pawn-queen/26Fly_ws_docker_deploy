@@ -95,6 +95,7 @@ RUN git clone --branch "${MAVLINK_ROUTER_VERSION}" --depth 1 \
 # torch、torchvision、TensorRT 和 Ultralytics 均由 Jetson 基础镜像提供；
 # 禁止普通 PyPI torch wheel 覆盖 Jetson 构建。
 # NumPy 固定为基础镜像原有的 1.26.4，并在下方实际验证 ROS cv_bridge 往返。
+# TensorRT 依赖 NVIDIA runtime 注入的 Jetson 库，仅在 verify-runtime 中导入和推理。
 COPY requirements.txt /tmp/26fly-requirements.txt
 RUN python3 -m pip install --no-cache-dir --no-deps -r /tmp/26fly-requirements.txt \
     && python3 -m pip check \
