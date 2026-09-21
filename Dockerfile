@@ -94,12 +94,13 @@ RUN git clone --branch "${MAVLINK_ROUTER_VERSION}" --depth 1 \
 
 # torch、torchvision、TensorRT 和 Ultralytics 均由 Jetson 基础镜像提供；
 # 禁止普通 PyPI torch wheel 覆盖 Jetson 构建。
+# NumPy 固定为基础镜像原有的 1.26.4，并在下方实际验证 ROS cv_bridge 往返。
 COPY requirements.txt /tmp/26fly-requirements.txt
 RUN python3 -m pip install --no-cache-dir --no-deps -r /tmp/26fly-requirements.txt \
     && python3 -m pip check \
     && python3 -c "from importlib.metadata import version; expected='${ULTRALYTICS_VERSION}'; actual=version('ultralytics'); assert actual == expected, f'expected ultralytics {expected}, got {actual}'" \
     && source "/opt/ros/${ROS_DISTRO}/setup.bash" \
-    && python3 -c "import cv2, numpy, scipy, tensorrt, torch, torchvision, ultralytics; from cv_bridge import CvBridge; a=numpy.zeros((2,2,3), dtype=numpy.uint8); b=CvBridge(); assert numpy.array_equal(a, b.imgmsg_to_cv2(b.cv2_to_imgmsg(a, encoding='bgr8'), desired_encoding='bgr8')); assert numpy.__version__ == '1.24.3'; assert cv2.__version__ == '4.11.0'" \
+    && python3 -c "import cv2, numpy, scipy, tensorrt, torch, torchvision, ultralytics; from cv_bridge import CvBridge; a=numpy.zeros((2,2,3), dtype=numpy.uint8); b=CvBridge(); assert numpy.array_equal(a, b.imgmsg_to_cv2(b.cv2_to_imgmsg(a, encoding='bgr8'), desired_encoding='bgr8')); assert numpy.__version__ == '1.26.4'; assert cv2.__version__ == '4.11.0'" \
     && rm -f /tmp/26fly-requirements.txt
 
 # 按初步方案固定为 root 运行。源码在 docker create 时只读挂载；root 的输出

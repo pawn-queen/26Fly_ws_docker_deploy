@@ -37,6 +37,12 @@ Jetson Ubuntu 22.04 host
 
 由于容器同时使用 systemd、privileged 和宿主 `/dev`，镜像启动的是最小 `26fly.target`，不会进入普通 `multi-user.target`。镜像还屏蔽了容器内 udev、内核模块加载、sysctl 和 `/dev` tmpfiles 单元，避免它们与宿主硬件管理发生冲突。容器使用独立 PID namespace 和 private cgroup namespace；`/run`、`/run/lock` 是 tmpfs。该模式仍不是安全隔离边界，只应用于受控 Jetson 和可信飞行网络。
 
+### 宿主前置条件与依赖边界
+
+开始第 1 节前，Jetson 宿主必须已经具备 JetPack 6 对应的 Jetson Linux/BSP、NVIDIA 驱动、Docker Engine、NVIDIA Container Runtime、cgroup v2、Git、宿主侧 `v4l2-ctl`（Ubuntu 包 `v4l-utils`）和可用网络。本仓库不会在宿主安装或升级这些组件；`check-host.sh` 是诊断脚本而不是安装器，并且不能代替对外部软件源连通性的确认。
+
+CUDA/TensorRT/PyTorch/torchvision/Ultralytics、ROS 2、RealSense 用户态组件和本项目 Python 依赖都属于容器镜像，不应安装到宿主，也不要在已经创建的 runtime 容器中手工执行 `pip install`。源码仓库 `26Season_Fly_ws_jetson/requirements.txt` 不参与本部署流程；镜像只使用本部署仓库的 `Dockerfile`、`apt-packages.txt` 和 `requirements.txt`，避免普通 PyPI 的 torch/OpenCV 包覆盖 Jetson 专用构建。
+
 ## 1. 配置宿主路径与硬件
 
 ```bash
@@ -44,7 +50,7 @@ cd /home/<user>/uav/26Fly_ws_docker_deploy
 ./scripts/init-env.sh --force
 ```
 
-初始化脚本按两个仓库位于同一 `uav` 目录的布局，自动把 `HOST_WS_SRC` 指向相邻的 `26Season_Fly_ws_jetson/src`，因此不依赖用户名。`.env` 保存镜像名、容器名、宿主路径、固定的 `px4_msgs` 来源和 volume 前缀；其中宿主路径和 volume 前缀在 `docker create` 时确定，`px4_msgs` 来源供初始化脚本使用。`config/runtime.env` 只读挂载到容器 `/etc/26fly`，每次服务或人工任务启动时重新读取，因此修改串口、topic、模型和 ROS domain 后不需要 recreate 容器。
+`--force` 只应用于首次初始化或明确需要重新生成配置时，因为它会覆盖已有 `.env`。初始化脚本按两个仓库位于同一 `uav` 目录的布局，自动把 `HOST_WS_SRC` 指向相邻的 `26Season_Fly_ws_jetson/src`，因此不依赖用户名。`.env` 保存镜像名、容器名、宿主路径、固定的 `px4_msgs` 来源和 volume 前缀；其中宿主路径和 volume 前缀在 `docker create` 时确定，`px4_msgs` 来源供初始化脚本使用。生成后先检查 `.env`，再继续部署。`config/runtime.env` 只读挂载到容器 `/etc/26fly`，每次服务或人工任务启动时重新读取，因此修改串口、topic、模型和 ROS domain 后不需要 recreate 容器。
 
 Jetson TensorRT 模型由源码仓库同步，detect 与 control 分别从各自包的模型目录读取：
 
@@ -53,7 +59,7 @@ Jetson TensorRT 模型由源码仓库同步，detect 与 control 分别从各自
 26Season_Fly_ws_jetson/src/fly/models/26fly_jetson.engine     # control
 ```
 
-两个文件必须分别在源码仓库中提交并推送；`check-host.sh` 会拒绝源码仓库存在未提交/未推送内容，以及任一模型缺失、非 `.engine`、未被 Git 跟踪或与当前提交不一致。模型和代码 `git pull` 后，既有容器会立即看到只读 bind mount 的新内容；重启相应任务进程即可加载，不需要 recreate。
+两个文件必须分别在源码仓库中提交并推送。部署前应先在源码仓库执行 `git fetch`/`git pull`；`check-host.sh` 本身不会访问远端，只会拒绝未提交内容以及 HEAD 与本地已知 upstream 不一致的状态，并检查任一模型是否缺失、非 `.engine`、未被 Git 跟踪或与当前提交不一致。模型和代码 `git pull` 后，既有容器会立即看到只读 bind mount 的新内容；重启相应任务进程即可加载，不需要 recreate。
 
 `px4_msgs` 不复制进主源码仓库历史，而是在其 `src` 下作为固定 tag 的独立 checkout 初始化：
 
@@ -83,16 +89,30 @@ RealSense 由 USB 驱动按设备识别，配置只检查名称中包含 `RealSe
 ./scripts/check-host.sh
 ```
 
-## 2. 首次 build、create 和 workspace 初始化
+首次部署时容器尚未创建，因此预检末尾出现 `persistent container '26fly-runtime' has not been created yet` warning 是预期现象；只要汇总中的 failure 为 0，预检仍成功。模型、`px4_msgs`、任一路串口、RealSense、广角相机或宿主诊断命令缺失则会计为 failure，必须先处理。
+
+执行到这里尚未安装任何容器依赖：`init-env.sh` 只生成 `.env`，`init-px4-msgs.sh` 只克隆并校验固定版本的 ROS 消息源码，`check-host.sh` 只做只读预检。首次下载或安装容器用户态依赖发生在下一节的 `build-image.sh`。
+
+## 2. 构建镜像、创建容器和编译 workspace
+
+首次部署按以下顺序执行；第 1 节已经运行过 `init-px4-msgs.sh`，这里不重复执行：
 
 ```bash
-./scripts/init-px4-msgs.sh
 ./scripts/build-image.sh
 ./scripts/create-runtime.sh
 ./scripts/start-runtime.sh
 ./scripts/build-workspace.sh
 ./scripts/verify-runtime.sh
 ```
+
+其中只有 `build-image.sh` 会下载或安装系统/Python 依赖。它执行 `docker build`，依次完成：
+
+1. 获取 `ultralytics/ultralytics:8.4.138-jetson-jetpack6` 基础镜像；CUDA/TensorRT/PyTorch/torchvision/Ultralytics 已由该镜像提供，本仓库不会再次从 PyPI 安装它们。
+2. 根据 `apt-packages.txt` 安装 ROS 2 Humble、RealSense ROS wrapper、`cv_bridge`、colcon、相机诊断工具和原生编译工具等 apt 包。
+3. 从固定 tag 构建并安装 Micro XRCE-DDS Agent v2.4.2 与 mavlink-router v4。
+4. 从本部署仓库的 `requirements.txt` 以 `--no-deps` 安装固定的 NumPy 1.26.4、SciPy、headless OpenCV、LAP 和 colcon 兼容的 setuptools，最后校验完整依赖关系、Ultralytics 版本、ROS `cv_bridge` 图像往返及关键模块导入。
+
+因此第一次构建需要访问容器镜像仓库、Ubuntu/ROS apt 仓库、GitHub 和 Python 包源，并可能耗时较长；后续构建可以复用 Docker 缓存。`create-runtime.sh` 只创建容器、挂载和 named volume，`start-runtime.sh` 只启动容器内 systemd，`build-workspace.sh` 只用镜像中已有依赖执行 colcon 编译，`verify-runtime.sh` 只验证环境、硬件和 TensorRT 推理；这四步都不会补装缺失的 apt 或 pip 依赖。
 
 `verify-runtime.sh` 现在是实机就绪检查：要求两路串口 daemon 已打开指定设备、RealSense USB/video 分组存在、IMX577 首个 video 节点具备采集格式、workspace 已由当前固定的 `px4_msgs` 构建，并对 TensorRT engine 执行一次真实 dummy inference。因此应在所有设备接好后执行；它不再把缺设备或缺模型当作可忽略信息。
 
@@ -106,7 +126,7 @@ RealSense 由 USB 驱动按设备识别，配置只检查名称中包含 `RealSe
 
 如宿主存在 `/run/udev` 或 `/tmp/argus_socket`，创建脚本会额外挂载它们；不存在时不会在宿主制造空路径。
 
-只有 Dockerfile、apt/requirements、`container/` 启动与验证脚本、systemd unit 或底层 ABI 改变时才构建新镜像，并进行一次明确的容器迁移。本版本同时更新容器脚本并新增 `/home/pixel/flylogs` 持久化兼容链接，因此从旧镜像迁移时必须重新 build；源码、`.engine` 和 `config/runtime.env` 的日常变化不需要重建镜像。
+只有 Dockerfile、本部署仓库的 `apt-packages.txt`/`requirements.txt`、`container/` 启动与验证脚本、systemd unit 或底层 ABI 改变时才构建新镜像，并进行一次明确的容器迁移。本版本同时更新容器脚本并新增 `/home/pixel/flylogs` 持久化兼容链接，因此从旧镜像迁移时必须重新 build；源码、源码仓库的 `requirements.txt`、`.engine` 和 `config/runtime.env` 的日常变化不会自动改变镜像，也不需要仅因 bind mount 内容变化而重建镜像。若源码新增运行依赖，应先把经过验证并固定版本的依赖加入本部署仓库的 `apt-packages.txt` 或 `requirements.txt`，再重建和迁移容器。
 
 `HOST_WS_SRC`、`VOLUME_PREFIX` 和 bind/named-volume 挂载都在 `docker create` 时确定。本次从 archive 切换到 `26Season_Fly_ws_jetson`，已有容器必须保留式迁移；仅修改 `.env` 或重新 build 镜像不会改变旧容器挂载。先保留旧容器，再创建新的：
 
