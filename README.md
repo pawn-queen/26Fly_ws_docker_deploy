@@ -75,7 +75,7 @@ MAVLINK_SERIAL_CANDIDATES=""
 
 以上默认假定 1a86 TTL 适配器连接的飞控 UART 运行 uXRCE-DDS，CUAV USB 直连运行 MAVLink；必须用飞控端 `UXRCE_DDS_CFG`、`MAV_*_CONFIG`、`SYS_USB_AUTO` 和对应波特率确认。若协议角色相反，应交换两组设备。现有 `/dev/serial/by-id` 已稳定时无需安装示例 udev 规则；任一路 by-id 缺失都会保持 fail-closed，不会误开另一个 `ttyACM`。若实际只有一个串口，不得让两个服务同时打开它；应把其中一个链路改成 UDP，或增加独立链路。
 
-RealSense 由 USB 驱动按设备识别，配置只检查名称中包含 `RealSense`，不固定容易变化的 `video0–5`。当前广角相机枚举中 IMX577 的首个节点是 `/dev/video6`，运行配置据此设置。预检会确认它是名称分组的首节点且能列出采集格式；仍须核对实际分辨率与控制源码中的标定内参一致。
+RealSense 由 USB 驱动按设备识别，配置只检查名称中包含 `RealSense`，不固定容易变化的 `video0–5`。广角相机使用稳定的 `/dev/v4l/by-id/usb-LRCP_imx577_LRCP_imx577_01.00.00-video-index0`；预检会解析它实际指向的 `/dev/videoN`，确认它是 `imx577` 分组的首个节点且能列出采集格式，控制程序也直接打开该 by-id 路径。仍须核对实际分辨率与控制源码中的标定内参一致。
 
 检查 Jetson、Docker/NVIDIA runtime、cgroup v2、源码和硬件配置：
 
@@ -196,7 +196,7 @@ ALLOW_FLIGHT_CONTROL=YES ./fly_A.sh
 2. 控制入口会检查 PX4 topic/sample、RealSense 三条输入流和 `yolov5_ros2` publisher；`vehicle_command_ack` 的实际命令结果和三条 `/fmu/in/*` reader 身份仍必须在拆桨台架上验证。
 3. `detect/package.xml` 含无效 `test_interface`，`fly/package.xml` 错列 Python 标准库；因此依赖暂以审查过的 apt/pip 清单为主。
 4. 控制程序会在人工授权启动后自动请求 Offboard、解锁和起飞；回调异常处理、舵机数值/方向以及相机内外参必须在上桨前完成 fail-safe 与台架验证。
-5. 当前控制代码仍按相机名称选择分组中的首个 video 节点；`WIDE_CAMERA_DEVICE=/dev/video6` 是与现有枚举一致的启动守卫，不等价于代码已支持稳定 by-id 路径。
+5. 广角相机使用 by-id 路径，检查脚本和控制程序会将其解析到实际 `/dev/videoN` 后确认 `imx577` 分组的首个节点；相机重新枚举时允许 `/dev/videoN` 改变，但 by-id 链接必须重新出现且仍指向正确的 `video-index0`。
 
 以上问题不会被容器或 systemd 掩盖，控制入口保持 fail-closed。
 

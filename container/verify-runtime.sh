@@ -201,7 +201,12 @@ if [[ ! -c "${wide_camera_device}" ]]; then
     echo "ERROR: wide-camera character device is absent: ${wide_camera_device:-<unset>}" >&2
     exit 2
 fi
-if ! awk -v hint="${wide_camera_hint}" -v wanted="${wide_camera_device}" '
+wide_camera_real="$(readlink -f -- "${wide_camera_device}" 2>/dev/null || true)"
+if [[ -z "${wide_camera_real}" || ! -c "${wide_camera_real}" ]]; then
+    echo "ERROR: wide-camera path does not resolve to a character device: ${wide_camera_device}" >&2
+    exit 2
+fi
+if ! awk -v hint="${wide_camera_hint}" -v wanted="${wide_camera_real}" '
     /^[^[:space:]]/ { matched = index($0, hint) > 0; next }
     matched && !seen {
         device = $0
@@ -213,14 +218,14 @@ if ! awk -v hint="${wide_camera_hint}" -v wanted="${wide_camera_device}" '
     }
     END { exit(seen && first == wanted ? 0 : 1) }
 ' <<< "${camera_listing}"; then
-    echo "ERROR: camera hint '${wide_camera_hint}' does not select ${wide_camera_device} as its first video node." >&2
+    echo "ERROR: camera hint '${wide_camera_hint}' does not select ${wide_camera_device} -> ${wide_camera_real} as its first video node." >&2
     exit 2
 fi
 if ! v4l2-ctl --device "${wide_camera_device}" --list-formats-ext >/dev/null 2>&1; then
     echo "ERROR: ${wide_camera_device} does not expose usable V4L2 capture formats." >&2
     exit 2
 fi
-echo "Wide camera=${wide_camera_device} hint=${wide_camera_hint}"
+echo "Wide camera=${wide_camera_device} -> ${wide_camera_real} hint=${wide_camera_hint}"
 
 declare -A verified_models=()
 for label_and_model in \

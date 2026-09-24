@@ -53,9 +53,14 @@ if [[ ! -c "${camera_device}" || ! -r "${camera_device}" || ! -w "${camera_devic
     echo "ERROR: camera is not an accessible character device: ${camera_device}" >&2
     exit 2
 fi
+camera_device_real="$(readlink -f -- "${camera_device}" 2>/dev/null || true)"
+if [[ -z "${camera_device_real}" || ! -c "${camera_device_real}" ]]; then
+    echo "ERROR: camera path does not resolve to a character device: ${camera_device}" >&2
+    exit 2
+fi
 
 camera_listing="$(v4l2-ctl --list-devices 2>/dev/null || true)"
-if ! awk -v hint="${CONTROL_CAMERA_HINT:-imx577}" -v wanted="${camera_device}" '
+if ! awk -v hint="${CONTROL_CAMERA_HINT:-imx577}" -v wanted="${camera_device_real}" '
     /^[^[:space:]]/ { matched = index($0, hint) > 0; next }
     matched && !seen {
         device = $0
@@ -67,7 +72,7 @@ if ! awk -v hint="${CONTROL_CAMERA_HINT:-imx577}" -v wanted="${camera_device}" '
     }
     END { exit(seen && first == wanted ? 0 : 1) }
 ' <<< "${camera_listing}"; then
-    echo "REFUSED: camera hint '${CONTROL_CAMERA_HINT:-imx577}' does not select ${camera_device} as its first video node." >&2
+    echo "REFUSED: camera hint '${CONTROL_CAMERA_HINT:-imx577}' does not select ${camera_device} -> ${camera_device_real} as its first video node." >&2
     printf '%s\n' "${camera_listing}" >&2
     exit 67
 fi
@@ -183,6 +188,7 @@ args=(
     --photo-path /workspace/log/control/photos
     --video-path /workspace/log/control/videos
     --camera-hint "${CONTROL_CAMERA_HINT:-imx577}"
+    --camera-device "${camera_device}"
 )
 if [[ "${CONTROL_RECORD_VIDEO:-false}" == "true" ]]; then
     args+=(--record-video)

@@ -256,11 +256,15 @@ if [[ -r "${HOST_CONFIG_DIR}/runtime.env" ]]; then
 
     wide_camera_device="$(runtime_value WIDE_CAMERA_DEVICE)"
     wide_camera_hint="$(runtime_value CONTROL_CAMERA_HINT)"
+    wide_camera_real=""
+    if [[ -n "${wide_camera_device}" ]]; then
+        wide_camera_real="$(readlink -f -- "${wide_camera_device}" 2>/dev/null || true)"
+    fi
     if [[ -c "${wide_camera_device}" ]]; then
         ok "wide camera device exists: ${wide_camera_device}"
         if command -v v4l2-ctl >/dev/null 2>&1; then
             camera_listing="$(v4l2-ctl --list-devices 2>/dev/null || true)"
-            if awk -v hint="${wide_camera_hint}" -v wanted="${wide_camera_device}" '
+            if awk -v hint="${wide_camera_hint}" -v wanted="${wide_camera_real}" '
                 /^[^[:space:]]/ { matched = index($0, hint) > 0; next }
                 matched && !seen {
                     device = $0
@@ -272,9 +276,9 @@ if [[ -r "${HOST_CONFIG_DIR}/runtime.env" ]]; then
                 }
                 END { exit(seen && first == wanted ? 0 : 1) }
             ' <<< "${camera_listing}"; then
-                ok "camera hint '${wide_camera_hint}' selects ${wide_camera_device} as its first video node"
+                ok "camera hint '${wide_camera_hint}' selects ${wide_camera_device} -> ${wide_camera_real} as its first video node"
             else
-                fail "camera hint '${wide_camera_hint}' does not select ${wide_camera_device} as its first video node"
+                fail "camera hint '${wide_camera_hint}' does not select ${wide_camera_device} -> ${wide_camera_real} as its first video node"
             fi
             if v4l2-ctl --device "${wide_camera_device}" --list-formats-ext >/dev/null 2>&1; then
                 ok "wide camera exposes V4L2 capture formats: ${wide_camera_device}"
