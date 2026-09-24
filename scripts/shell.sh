@@ -5,5 +5,9 @@ set -Eeuo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/runtime.sh"
 load_runtime_settings
 ensure_runtime_running
-mapfile -t tty_args < <(interactive_args)
+tty_args=()
+if [[ -t 0 && -t 1 ]]; then
+    tty_args=(-it)
+fi
+
 exec docker exec "${tty_args[@]}" "${CONTAINER_NAME}" 26fly-shell "$@"
