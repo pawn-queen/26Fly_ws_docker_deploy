@@ -92,4 +92,4 @@ if [[ -n "${px4_msgs_status}" ]]; then
 fi
 
 echo "px4_msgs ready: ref=${PX4_MSGS_REF} commit=${current_commit} version=${actual_version}"
-echo "Next: ./scripts/build-workspace.sh"
+echo "Next for a first deployment: ./scripts/check-host.sh, then continue with README section 2."
