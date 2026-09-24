@@ -102,9 +102,10 @@ RealSense 由 USB 驱动按设备识别，配置只检查名称中包含 `RealSe
 - `--restart unless-stopped`、NVIDIA runtime、host network、host IPC；
 - root、`--privileged`、`/dev:/dev`、`--cgroupns private`；
 - `/run` 与 `/run/lock` tmpfs；
+- 宿主存在 `/tmp/.X11-unix` 时，将整个目录只读挂载到容器，供显式 GUI 调试入口使用；
 - `${VOLUME_PREFIX}-build`、`${VOLUME_PREFIX}-install`、`${VOLUME_PREFIX}-log`。
 
-如宿主存在 `/run/udev` 或 `/tmp/argus_socket`，创建脚本会额外挂载它们；不存在时不会在宿主制造空路径。
+如宿主存在 `/run/udev`、`/tmp/argus_socket` 或 `/tmp/.X11-unix`，创建脚本会额外挂载它们；不存在时不会在宿主制造空路径。`DISPLAY` 和 Xauthority 不会固化到容器，只由 GUI 调试入口按当前登录会话临时传入。
 
 只有 Dockerfile、apt/requirements、`container/` 启动与验证脚本、systemd unit 或底层 ABI 改变时才构建新镜像，并进行一次明确的容器迁移。本版本同时更新容器脚本并新增 `/home/pixel/flylogs` 持久化兼容链接，因此从旧镜像迁移时必须重新 build；源码、`.engine` 和 `config/runtime.env` 的日常变化不需要重建镜像。
 
@@ -168,6 +169,48 @@ RealSense 和实机检测在不同终端人工运行：
 ```
 
 检测入口固定为 `ros2 run detect detect`。控制包装器显式调用 `control.0821auto`，不依赖历史仿真入口。整个 `src` 是单一只读 bind mount；宿主 Git 更新会立即反映到容器。
+
+以上两个入口是比赛用无界面路径，语义保持固定：相机只发布 ROS topic，detect 固定使用
+`show_image=false`，不继承宿主 `DISPLAY`。比赛时不要改用下面的调试入口。
+
+### 可选的 RealSense/detect GUI 调试
+
+调试时从 Jetson 当前图形桌面或远程桌面的终端运行：
+
+```bash
+echo "$DISPLAY"
+./scripts/run-vision-debug.sh
+```
+
+该入口一次启动 RealSense、无界面 detect 和独立的 C++ viewer。viewer 订阅彩色图、对齐深度、
+CameraInfo 与 `/target_observation`；detect 仍由原来的 `run-detect` 启动且保持
+`show_image=false`，所以关闭窗口、X11 断开或 viewer 异常不会进入 detect 的图像回调。
+按 `q`、Esc 或在终端按 Ctrl-C 会结束本次调试入口拉起的三个进程。
+
+`/target_observation` 只提供被选中目标的三维中心点和置信度，不包含所有检测框或类别。
+因此 viewer 会按消息时间戳找到对应彩色帧，投影并标出选中目标中心，同时显示 XYZ、置信度
+和对齐深度；它不会伪造无法从现有 ROS 接口恢复的完整框。若检测消息与缓存图像时间戳不匹配，
+窗口明确显示 `UNMATCHED`，不会把旧目标画到最新帧。
+
+调试入口仅接受本地形式的 X11 display（例如 `:1002`），每次动态读取当前 `$DISPLAY`，不会将
+会话编号写入容器配置。脚本用当前图形用户的 Xauthority cookie 创建容器内临时授权文件，
+不会执行 `xhost +`；因此不要用 `sudo` 启动它。调试入口会拒绝已有的 camera、detect 或 control，
+且不启动或预览广角相机。
+
+X11 socket bind 和 viewer 都属于容器创建/镜像内容。升级已有 runtime 时必须先构建镜像，再做
+一次保留式容器迁移；单纯 `docker restart` 不能给旧容器增加 mount：
+
+```bash
+./scripts/build-image.sh
+docker stop 26fly-runtime
+docker rename 26fly-runtime 26fly-runtime-pre-vision-gui
+./scripts/create-runtime.sh
+./scripts/start-runtime.sh
+./scripts/verify-runtime.sh
+```
+
+本次变化不改变 workspace ABI，可继续使用 `.env` 中现有的 build/install/log named volumes。
+确认新容器的比赛路径和调试路径均正常前，保留改名后的旧容器以便回退。
 
 必须先保持 `run-camera.sh` 与 `run-detect.sh` 正常运行，再启动控制。`fly_A.sh` 会等待并检查彩色图、对齐深度、相机内参的近期样本，以及 `yolov5_ros2` 对 `/target_observation` 的 publisher；视觉链不完整时拒绝进入控制程序。
 

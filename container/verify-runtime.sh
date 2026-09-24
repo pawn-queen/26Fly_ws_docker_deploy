@@ -83,6 +83,27 @@ done
 [[ "${RMW_IMPLEMENTATION}" == "rmw_fastrtps_cpp" ]]
 command -v MicroXRCEAgent >/dev/null
 command -v mavlink-routerd >/dev/null
+command -v flock >/dev/null
+command -v setsid >/dev/null
+command -v run-vision-debug >/dev/null
+command -v vision-debug-viewer >/dev/null
+command -v xauth >/dev/null
+
+viewer_executable="$(command -v vision-debug-viewer)"
+viewer_linkage="$(ldd "${viewer_executable}")"
+if grep 'not found' <<<"${viewer_linkage}" >/dev/null; then
+    echo "ERROR: vision-debug-viewer has unresolved shared-library dependencies." >&2
+    echo "${viewer_linkage}" >&2
+    exit 2
+fi
+for required_library in libcv_bridge libopencv_core libopencv_imgproc libopencv_highgui; do
+    if ! grep "${required_library}" <<<"${viewer_linkage}" >/dev/null; then
+        echo "ERROR: vision-debug-viewer is not linked to ${required_library}." >&2
+        echo "${viewer_linkage}" >&2
+        exit 2
+    fi
+done
+echo "Decoupled X11 vision viewer: OK"
 
 agent_library=/usr/local/lib/libmicroxrcedds_agent.so
 if [[ ! -r "${agent_library}" ]]; then

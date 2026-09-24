@@ -54,6 +54,9 @@ gstreamer1.0-tools
 libgl1
 libglib2.0-0
 libgstreamer1.0-0
+libopencv-dev
 libusb-1.0-0
 usbutils
+util-linux
 v4l-utils
+xauth

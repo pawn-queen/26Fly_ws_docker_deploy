@@ -104,6 +104,18 @@ RUN python3 -m pip install --no-cache-dir --no-deps -r /tmp/26fly-requirements.t
     && python3 -c "import cv2, numpy, scipy, torch, torchvision, ultralytics; from cv_bridge import CvBridge; a=numpy.zeros((2,2,3), dtype=numpy.uint8); b=CvBridge(); assert numpy.array_equal(a, b.imgmsg_to_cv2(b.cv2_to_imgmsg(a, encoding='bgr8'), desired_encoding='bgr8')); assert numpy.__version__ == '1.26.4'; assert cv2.__version__ == '4.11.0'" \
     && rm -f /tmp/26fly-requirements.txt
 
+# The detector keeps using the pinned headless Python OpenCV wheel.  This
+# separate C++ viewer links Ubuntu's GUI-enabled OpenCV, so an X11 failure can
+# terminate the debug window without affecting inference or target publishing.
+COPY container/vision-debug-viewer /tmp/26fly-vision-debug-viewer
+RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
+    && cmake -S /tmp/26fly-vision-debug-viewer -B /tmp/26fly-vision-debug-viewer/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /tmp/26fly-vision-debug-viewer/build --parallel "${BUILD_JOBS}" \
+    && cmake --install /tmp/26fly-vision-debug-viewer/build \
+    && rm -rf /tmp/26fly-vision-debug-viewer
+
 # 按初步方案固定为 root 运行。源码在 docker create 时只读挂载；root 的输出
 # 只进入 build/install/log named volume。
 RUN mkdir -p \
@@ -133,6 +145,7 @@ COPY --chmod=0755 container/resolve-device.sh /usr/local/bin/resolve-device
 COPY --chmod=0755 container/run-camera.sh /usr/local/bin/run-camera
 COPY --chmod=0755 container/run-control.sh /usr/local/bin/run-control
 COPY --chmod=0755 container/run-detect.sh /usr/local/bin/run-detect
+COPY --chmod=0755 container/run-vision-debug.sh /usr/local/bin/run-vision-debug
 COPY --chmod=0755 container/run-mavlink-routerd.sh /usr/local/bin/run-mavlink-routerd
 COPY --chmod=0755 container/run-micro-xrce-agent.sh /usr/local/bin/run-micro-xrce-agent
 COPY --chmod=0755 container/shell.sh /usr/local/bin/26fly-shell

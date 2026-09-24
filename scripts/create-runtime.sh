@@ -41,6 +41,11 @@ fi
 if [[ -S /tmp/argus_socket ]]; then
     optional_mounts+=(--volume /tmp/argus_socket:/tmp/argus_socket)
 fi
+if [[ -d /tmp/.X11-unix ]]; then
+    optional_mounts+=(--volume /tmp/.X11-unix:/tmp/.X11-unix:ro)
+else
+    echo "WARNING: /tmp/.X11-unix is absent; this container will not support the optional GUI debug entry." >&2
+fi
 
 docker create \
     --name "${CONTAINER_NAME}" \
@@ -75,6 +80,9 @@ echo "Created persistent container: ${CONTAINER_NAME}"
 echo "src:     ${HOST_WS_SRC} -> /workspace/src (read-only)"
 echo "config:  ${HOST_CONFIG_DIR} -> /etc/26fly (read-only)"
 echo "volumes: ${build_volume}, ${install_volume}, ${log_volume}"
+if [[ -d /tmp/.X11-unix ]]; then
+    echo "debug X11: /tmp/.X11-unix -> /tmp/.X11-unix (read-only; DISPLAY is per invocation)"
+fi
 echo "security mode: root + privileged + /dev:/dev (required by 初步方案.md)"
 echo "PID 1: /sbin/init (container-internal systemd, cgroup namespace: private)"
 echo "Next: ./scripts/start-runtime.sh"

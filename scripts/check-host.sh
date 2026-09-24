@@ -364,6 +364,11 @@ if [[ "${docker_daemon_available}" == "true" ]] && container_exists; then
     check_bind_mount /workspace/src "${HOST_WS_SRC}" false
     check_bind_mount /workspace/models "${HOST_MODEL_DIR}" false
     check_bind_mount /etc/26fly "${HOST_CONFIG_DIR}" false
+    if [[ -d /tmp/.X11-unix ]]; then
+        check_bind_mount /tmp/.X11-unix /tmp/.X11-unix false
+    else
+        warn "/tmp/.X11-unix is absent; optional GUI debugging is unavailable"
+    fi
     check_named_volume /workspace/build "${VOLUME_PREFIX}-build"
     check_named_volume /workspace/install "${VOLUME_PREFIX}-install"
     check_named_volume /workspace/log "${VOLUME_PREFIX}-log"
