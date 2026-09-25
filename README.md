@@ -137,8 +137,8 @@ docker rename 26fly-runtime 26fly-runtime-pre-jetson-workspace
 
 ```bash
 ./scripts/shell.sh
-systemctl status micro-xrce-agent
-systemctl status mavlink-routerd
+systemctl status micro-xrce-agent.service
+systemctl status mavlink-routerd.service
 ```
 
 这两条 `systemctl` 命令连接的是容器 PID 1，而不是宿主 systemd。最小 target 不启动 journald；两个服务继承 PID 1 的 stdout/stderr，由 `docker logs` 统一收集。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
@@ -217,7 +217,11 @@ docker rename 26fly-runtime 26fly-runtime-pre-vision-gui
 真实控制必须由操作员逐次授权：
 
 ```bash
-ALLOW_FLIGHT_CONTROL=YES ./fly_A.sh
+ALLOW_FLIGHT_CONTROL=YES ./pid_132.sh
+或
+ALLOW_FLIGHT_CONTROL=YES ./pid_231.sh
+或
+ALLOW_FLIGHT_CONTROL=YES ./pid_213.sh
 ```
 
 任务前台运行 `control/0821auto.py`；进程退出表示任务结束，systemd 管理的两个通信服务和容器继续运行。许可只传给本次 `docker exec`，`config/runtime.env` 永久保持 `ALLOW_FLIGHT_CONTROL=NO`。

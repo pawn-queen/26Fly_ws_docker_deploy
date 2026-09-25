@@ -1,0 +1,21 @@
+[Unit]
+Description=26Fly detector
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionPathExists=/etc/26fly/runtime.env
+
+[Service]
+Type=exec
+WorkingDirectory=/workspace
+ExecStart=/usr/local/bin/run-detect
+Restart=no
+KillMode=control-group
+KillSignal=SIGINT
+SendSIGKILL=yes
+TimeoutStopSec=15
+StandardOutput=inherit
+StandardError=inherit
+
+[Install]
+WantedBy=26fly.target

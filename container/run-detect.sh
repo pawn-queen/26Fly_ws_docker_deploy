@@ -3,6 +3,9 @@ set -Eeuo pipefail
 
 # shellcheck disable=SC1091
 source /usr/local/lib/26fly/env.sh
+# shellcheck disable=SC1091
+source /usr/local/lib/26fly/task-instance.sh
+acquire_26fly_task_lock detect
 
 if [[ ! -f /workspace/install/local_setup.bash ]]; then
     echo "ERROR: workspace is not built. Run ./scripts/build-workspace.sh on the host." >&2

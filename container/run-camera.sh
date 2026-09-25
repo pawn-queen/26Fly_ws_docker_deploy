@@ -3,6 +3,9 @@ set -Eeuo pipefail
 
 # shellcheck disable=SC1091
 source /usr/local/lib/26fly/env.sh
+# shellcheck disable=SC1091
+source /usr/local/lib/26fly/task-instance.sh
+acquire_26fly_task_lock camera
 
 if [[ ! -d /dev/bus/usb ]]; then
     echo "ERROR: /dev/bus/usb is absent. Check the host and the /dev:/dev bind mount." >&2

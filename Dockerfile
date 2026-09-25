@@ -141,6 +141,7 @@ RUN mkdir -p \
 COPY --chmod=0755 container/build-workspace.sh /usr/local/bin/build-workspace
 COPY --chmod=0755 container/check-rosdep.sh /usr/local/bin/check-rosdep
 COPY --chmod=0755 container/env.sh /usr/local/lib/26fly/env.sh
+COPY --chmod=0644 container/task-instance.sh /usr/local/lib/26fly/task-instance.sh
 COPY --chmod=0755 container/resolve-device.sh /usr/local/bin/resolve-device
 COPY --chmod=0755 container/run-camera.sh /usr/local/bin/run-camera
 COPY --chmod=0755 container/run-control.sh /usr/local/bin/run-control
@@ -151,6 +152,8 @@ COPY --chmod=0755 container/run-micro-xrce-agent.sh /usr/local/bin/run-micro-xrc
 COPY --chmod=0755 container/shell.sh /usr/local/bin/26fly-shell
 COPY --chmod=0755 container/verify-runtime.sh /usr/local/bin/verify-runtime
 COPY container/systemd/26fly.target /etc/systemd/system/26fly.target
+COPY container/systemd/26fly-camera.service /etc/systemd/system/26fly-camera.service
+COPY container/systemd/26fly-detect.service /etc/systemd/system/26fly-detect.service
 COPY container/systemd/micro-xrce-agent.service /etc/systemd/system/micro-xrce-agent.service
 COPY container/systemd/mavlink-routerd.service /etc/systemd/system/mavlink-routerd.service
 

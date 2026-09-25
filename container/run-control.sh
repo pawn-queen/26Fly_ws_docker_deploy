@@ -12,6 +12,10 @@ if [[ "${operator_permission}" != "YES" ]]; then
     echo "Only do this after props-off bench checks and source review." >&2
     exit 64
 fi
+# shellcheck disable=SC1091
+source /usr/local/lib/26fly/task-instance.sh
+acquire_26fly_task_lock control
+
 if [[ ! -f /workspace/install/local_setup.bash ]]; then
     echo "ERROR: workspace is not built. Run ./scripts/build-workspace.sh on the host." >&2
     exit 2
