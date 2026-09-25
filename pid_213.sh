@@ -2,7 +2,6 @@
 set -Eeuo pipefail
 
 deploy_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-exec "${deploy_dir}/scripts/run-control.sh" "$@"
 
 control_args=(
   --first-align-threshold 0.25 \
@@ -34,3 +33,5 @@ control_args=(
   --post-drop-delay 1.0 \
   --recon-search-height -2.7 \
 )
+
+exec "${deploy_dir}/scripts/run-control.sh" "${control_args[@]}" "$@"
