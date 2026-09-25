@@ -62,6 +62,34 @@ declare -A service_serial_device=(
     [micro-xrce-agent.service]="${xrce_device_real}"
     [mavlink-routerd.service]="${mavlink_device_real}"
 )
+
+verify_current_invocation_startup_log() {
+    local service=$1
+    local expected_log=$2
+    local invocation_id
+    local startup_output
+
+    invocation_id="$(systemctl show --property=InvocationID --value "${service}")"
+    if [[ -z "${invocation_id}" ]]; then
+        echo "ERROR: ${service} has no current systemd InvocationID; inspect systemctl status ${service}." >&2
+        exit 2
+    fi
+
+    if ! startup_output="$(
+        journalctl --quiet --no-pager \
+            "_SYSTEMD_INVOCATION_ID=${invocation_id}" \
+            --grep="${expected_log}" \
+            --output=cat
+    )"; then
+        echo "ERROR: failed to query journald for the current ${service} invocation (${invocation_id})." >&2
+        exit 2
+    fi
+    if [[ -z "${startup_output}" ]]; then
+        echo "ERROR: ${service} startup output is absent from its current invocation (${invocation_id}); inspect journalctl -u ${service}." >&2
+        exit 2
+    fi
+}
+
 for service in micro-xrce-agent.service mavlink-routerd.service; do
     if [[ "$(systemctl is-enabled "${service}")" != "enabled" ]]; then
         echo "ERROR: ${service} is not enabled in 26fly.target." >&2
@@ -100,10 +128,7 @@ for service in micro-xrce-agent.service mavlink-routerd.service; do
         fi
     fi
     echo "Service ready: ${service} pid=${main_pid} executable=${main_executable} device=${serial_device:-network}"
-    if [[ -z "$(journalctl --quiet --no-pager --unit="${service}" --grep="${expected_service_log[${service}]}" --lines=1 --output=cat)" ]]; then
-        echo "ERROR: ${service} startup output is absent from journald; inspect its output configuration and journald status." >&2
-        exit 2
-    fi
+    verify_current_invocation_startup_log "${service}" "${expected_service_log[${service}]}"
 done
 
 [[ "${RMW_IMPLEMENTATION}" == "rmw_fastrtps_cpp" ]]
