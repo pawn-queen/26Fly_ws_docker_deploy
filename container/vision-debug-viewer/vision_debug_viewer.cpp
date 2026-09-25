@@ -252,7 +252,16 @@ public:
       return false;
     }
     try {
-      return cv::getWindowProperty(kWindowName, cv::WND_PROP_VISIBLE) >= 1.0;
+      const double visibility =
+          cv::getWindowProperty(kWindowName, cv::WND_PROP_VISIBLE);
+      if (visibility >= 1.0) {
+        window_was_visible_ = true;
+        return true;
+      }
+      if (visibility < 0.0) {
+        return true;
+      }
+      return !window_was_visible_;
     } catch (const cv::Exception &exception) {
       RCLCPP_WARN(get_logger(), "Debug window was closed: %s",
                   exception.what());
@@ -477,6 +486,7 @@ private:
   std::int64_t max_color_depth_skew_ns_{40000000};
   bool display_depth_{true};
   bool window_created_{false};
+  bool window_was_visible_{false};
 };
 
 } // namespace
