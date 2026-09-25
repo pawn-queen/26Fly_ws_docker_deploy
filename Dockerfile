@@ -152,10 +152,14 @@ COPY --chmod=0755 container/run-micro-xrce-agent.sh /usr/local/bin/run-micro-xrc
 COPY --chmod=0755 container/shell.sh /usr/local/bin/26fly-shell
 COPY --chmod=0755 container/verify-runtime.sh /usr/local/bin/verify-runtime
 COPY container/systemd/26fly.target /etc/systemd/system/26fly.target
+COPY container/systemd/26fly-journald.conf /etc/systemd/journald.conf.d/26fly.conf
 COPY container/systemd/26fly-camera.service /etc/systemd/system/26fly-camera.service
 COPY container/systemd/26fly-detect.service /etc/systemd/system/26fly-detect.service
 COPY container/systemd/micro-xrce-agent.service /etc/systemd/system/micro-xrce-agent.service
 COPY container/systemd/mavlink-routerd.service /etc/systemd/system/mavlink-routerd.service
+
+# 持久 journal 留在容器可写层；重启保留，删除容器时随之删除。
+RUN mkdir -p /var/log/journal
 
 # 只启用两个通信服务。自定义 target 不拉起普通主机式 multi-user 服务；同时
 # 显式屏蔽会与宿主 /dev、内核参数或内核模块争用的单元。

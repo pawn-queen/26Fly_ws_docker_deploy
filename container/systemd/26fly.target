@@ -4,3 +4,4 @@ DefaultDependencies=no
 Conflicts=shutdown.target
 Before=shutdown.target
 AllowIsolate=yes
+Wants=systemd-journald.service systemd-journal-flush.service

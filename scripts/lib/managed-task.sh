@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # This file is sourced by the host camera/detect/control wrappers after
-# runtime.sh.  The foreground log follower keeps the container log attached to
-# the operator terminal while systemd owns each task process group.
+# runtime.sh. The foreground log follower keeps the selected unit's output
+# attached to the operator terminal while systemd owns its process group.
 
 _managed_task_systemctl() {
     docker exec \
@@ -37,6 +37,36 @@ _managed_task_stop_logs() {
         wait "${_MANAGED_TASK_LOG_PID}" 2>/dev/null || true
         _MANAGED_TASK_LOG_PID=
     fi
+}
+
+_managed_task_require_journald() {
+    if ! _managed_task_systemctl is-active --quiet systemd-journald.service ||
+       ! _managed_task_systemctl is-active --quiet systemd-journal-flush.service; then
+        echo "ERROR: container journald or journal flush is not active; inspect systemctl status systemd-journald.service systemd-journal-flush.service." >&2
+        return 2
+    fi
+}
+
+_managed_task_start_logs() {
+    local started_at
+
+    case "${_MANAGED_TASK_LABEL}" in
+        camera|control)
+            # Capture the boundary before the unit starts, so a quick startup
+            # cannot outrun the asynchronous journalctl follower.
+            started_at="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            # A PTY hangs up the container-side follower when this Docker
+            # client is stopped by _managed_task_stop_logs.
+            docker exec --tty --env SYSTEMD_COLORS=0 "${_MANAGED_TASK_CONTAINER}" \
+                journalctl --no-pager --follow --lines=all --output=cat \
+                --since="${started_at}" \
+                --unit="${_MANAGED_TASK_UNIT}" &
+            ;;
+        detect)
+            docker logs --follow --tail 0 "${_MANAGED_TASK_CONTAINER}" &
+            ;;
+    esac
+    _MANAGED_TASK_LOG_PID=$!
 }
 
 _managed_task_read_unit_property() {
@@ -339,10 +369,22 @@ run_managed_task_unit() {
 
     _managed_task_wait_for_systemd
 
+    if [[ "${task_label}" == camera ]]; then
+        _managed_task_require_journald
+    fi
+
     load_state="$(_managed_task_systemctl show --property=LoadState --value "${unit_name}")"
     if [[ "${load_state}" != "loaded" ]]; then
         echo "ERROR: ${unit_name} is not loaded in ${CONTAINER_NAME}; rebuild the image and migrate the container." >&2
         return 2
+    fi
+
+    if [[ "${task_label}" == camera ]]; then
+        if [[ "$(_managed_task_systemctl show --property=StandardOutput --value "${unit_name}")" != "journal" ]] ||
+           [[ "$(_managed_task_systemctl show --property=StandardError --value "${unit_name}")" != "journal" ]]; then
+            echo "ERROR: ${unit_name} does not send stdout/stderr to journald; rebuild the image and migrate the container." >&2
+            return 2
+        fi
     fi
 
     active_state="$(_managed_task_systemctl show --property=ActiveState --value "${unit_name}")"
@@ -363,8 +405,7 @@ run_managed_task_unit() {
     trap '_managed_task_handle_signal 143 SIGTERM' TERM
     trap '_managed_task_handle_signal 129 SIGHUP' HUP
 
-    docker logs --follow --tail 0 "${CONTAINER_NAME}" &
-    _MANAGED_TASK_LOG_PID=$!
+    _managed_task_start_logs
 
     echo "Starting ${task_label} as ${unit_name}; press Ctrl-C to stop it." >&2
     _MANAGED_TASK_LAUNCHING=true
@@ -511,6 +552,7 @@ run_managed_control_unit() {
     _MANAGED_TASK_OWNER_TOKEN=${owner_description}
 
     _managed_task_wait_for_systemd
+    _managed_task_require_journald
 
     active_state="$(_managed_task_systemctl show --property=ActiveState --value "${unit_name}" 2>/dev/null || true)"
     case "${active_state}" in
@@ -530,8 +572,7 @@ run_managed_control_unit() {
     trap '_managed_task_handle_signal 143 SIGTERM' TERM
     trap '_managed_task_handle_signal 129 SIGHUP' HUP
 
-    docker logs --follow --tail 0 "${CONTAINER_NAME}" &
-    _MANAGED_TASK_LOG_PID=$!
+    _managed_task_start_logs
 
     echo "Starting control as transient ${unit_name}; press Ctrl-C to stop it completely." >&2
     _MANAGED_TASK_LAUNCHING=true
@@ -561,8 +602,8 @@ run_managed_control_unit() {
             --property=KillSignal=SIGINT \
             --property=SendSIGKILL=yes \
             --property=TimeoutStopSec=15s \
-            --property=StandardOutput=file:/proc/1/fd/1 \
-            --property=StandardError=file:/proc/1/fd/2 \
+            --property=StandardOutput=journal \
+            --property=StandardError=journal \
             -- /usr/local/bin/run-control "$@"
     ) &
     _MANAGED_TASK_WAIT_PID=$!

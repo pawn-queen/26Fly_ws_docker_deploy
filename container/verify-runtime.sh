@@ -32,9 +32,31 @@ if [[ -n "${xrce_device_real}" && "${xrce_device_real}" == "${mavlink_device_rea
 fi
 
 systemctl is-active --quiet 26fly.target
+if ! systemctl is-active --quiet systemd-journald.service ||
+   ! systemctl is-active --quiet systemd-journal-flush.service; then
+    echo "ERROR: journald or journal flush is not active; inspect systemctl status systemd-journald.service systemd-journal-flush.service." >&2
+    exit 2
+fi
+if [[ ! -d /var/log/journal || ! -w /var/log/journal ]] ||
+   ! find /var/log/journal -maxdepth 2 -type f -name '*.journal' -print -quit | grep -q .; then
+    echo "ERROR: persistent journald storage is unavailable under /var/log/journal." >&2
+    exit 2
+fi
+for service in micro-xrce-agent.service mavlink-routerd.service 26fly-camera.service; do
+    for property in StandardOutput StandardError; do
+        if [[ "$(systemctl show --property="${property}" --value "${service}")" != "journal" ]]; then
+            echo "ERROR: ${service} ${property} does not send output to journald." >&2
+            exit 2
+        fi
+    done
+done
 declare -A expected_service_executable=(
     [micro-xrce-agent.service]=MicroXRCEAgent
     [mavlink-routerd.service]=mavlink-routerd
+)
+declare -A expected_service_log=(
+    [micro-xrce-agent.service]='Starting Micro XRCE-DDS Agent'
+    [mavlink-routerd.service]='Starting mavlink-routerd'
 )
 declare -A service_serial_device=(
     [micro-xrce-agent.service]="${xrce_device_real}"
@@ -50,7 +72,7 @@ for service in micro-xrce-agent.service mavlink-routerd.service; do
         exit 2
     fi
     if ! systemctl is-active --quiet "${service}"; then
-        echo "ERROR: ${service} is not active; inspect docker logs for its selected device." >&2
+        echo "ERROR: ${service} is not active; inspect journalctl -u ${service} for its selected device." >&2
         exit 2
     fi
     main_pid="$(systemctl show --property=MainPID --value "${service}")"
@@ -78,6 +100,10 @@ for service in micro-xrce-agent.service mavlink-routerd.service; do
         fi
     fi
     echo "Service ready: ${service} pid=${main_pid} executable=${main_executable} device=${serial_device:-network}"
+    if [[ -z "$(journalctl --quiet --no-pager --unit="${service}" --grep="${expected_service_log[${service}]}" --lines=1 --output=cat)" ]]; then
+        echo "ERROR: ${service} startup output is absent from journald; inspect its output configuration and journald status." >&2
+        exit 2
+    fi
 done
 
 [[ "${RMW_IMPLEMENTATION}" == "rmw_fastrtps_cpp" ]]

@@ -23,4 +23,6 @@ docker exec \
     --env SYSTEMD_COLORS=0 \
     --env SYSTEMD_PAGER=cat \
     "${CONTAINER_NAME}" \
-    systemctl --no-pager --full status micro-xrce-agent.service mavlink-routerd.service || true
+    systemctl --no-pager --full status \
+        systemd-journald.service systemd-journal-flush.service \
+        micro-xrce-agent.service mavlink-routerd.service || true

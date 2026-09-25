@@ -4,6 +4,8 @@ DefaultDependencies=no
 Conflicts=shutdown.target
 Before=shutdown.target
 ConditionPathExists=/etc/26fly/runtime.env
+Requires=systemd-journald.service systemd-journal-flush.service
+After=systemd-journald.service systemd-journal-flush.service
 
 [Service]
 Type=exec
@@ -14,8 +16,8 @@ KillMode=control-group
 KillSignal=SIGINT
 SendSIGKILL=yes
 TimeoutStopSec=15
-StandardOutput=inherit
-StandardError=inherit
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=26fly.target

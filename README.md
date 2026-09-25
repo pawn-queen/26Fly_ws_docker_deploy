@@ -14,7 +14,9 @@ Jetson Ubuntu 22.04 host
 ├── PID 1: /sbin/init --unit=26fly.target
 ├── container systemd
 │   ├── micro-xrce-agent.service   Restart=always
-│   └── mavlink-routerd.service    Restart=always
+│   ├── mavlink-routerd.service    Restart=always
+│   ├── systemd-journald.service   console logs by unit
+│   └── camera/control             manually started units
 ├── ROS 2 Humble + rmw_fastrtps_cpp
 ├── CUDA/TensorRT/PyTorch/YOLO/OpenCV/RealSense userspace
 └── /workspace
@@ -29,8 +31,8 @@ Jetson Ubuntu 22.04 host
 - 只有一个长期存在的 runtime 容器；不采用一节点一容器，也不使用 Compose 管理 ROS 节点。
 - 日常生命周期是 `docker start`、`docker stop`、`docker exec`。同名容器存在时，创建脚本拒绝自动删除或 recreate。
 - 容器按方案使用 root、`--privileged` 和 `/dev:/dev`，动态出现的 UART、USB、video、media 节点对既有容器立即可见。
-- 源码只读挂载到 `/workspace/src`，宿主保存修改后容器立即可见。root 产生的 build/install/log 只写入 named volume。
-- systemd 只负责两个长期通信服务。RealSense、detect 和 control 是人工启动的任务进程，不属于 systemd。
+- 源码只读挂载到 `/workspace/src`，宿主保存修改后容器立即可见。build/install 和应用文件日志写入 named volume；journald 写入容器可写层。
+- systemd 自动启动并监督两个长期通信服务。RealSense、detect 和 control 由人工启动，运行期间也由容器内 systemd 托管。
 - control 永不随容器或 Jetson 开机启动；任务退出不会停止容器、Agent 或 mavlink-router。
 - Jetson BSP、内核模块、GPU 驱动和宿主 udev 不进入镜像。
 - 禁止执行 `chmod -R 777 /dev`。
@@ -130,7 +132,10 @@ docker rename 26fly-runtime 26fly-runtime-pre-jetson-workspace
 ```bash
 ./scripts/systemctl.sh status micro-xrce-agent mavlink-routerd
 ./scripts/systemctl.sh restart micro-xrce-agent mavlink-routerd
-./scripts/logs.sh --tail 200 -f
+./scripts/logs.sh -u mavlink-routerd.service -n 200
+./scripts/logs.sh -u micro-xrce-agent.service --since today -f
+./scripts/logs.sh -u 26fly-camera.service -n 100
+./scripts/logs.sh -u 26fly-control.service -n 100
 ```
 
 也可以进入容器后直接操作：
@@ -141,7 +146,22 @@ systemctl status micro-xrce-agent.service
 systemctl status mavlink-routerd.service
 ```
 
-这两条 `systemctl` 命令连接的是容器 PID 1，而不是宿主 systemd。最小 target 不启动 journald；两个服务继承 PID 1 的 stdout/stderr，由 `docker logs` 统一收集。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
+这些 `systemctl` 和 `journalctl` 命令连接的是容器内 systemd 与 journald，而不是宿主服务。最小 target 启动 journald 和 journal flush；MAVLink、Agent、Depth cam、Control 的 stdout/stderr 按 unit 存入 `/var/log/journal`。`scripts/logs.sh` 将参数原样交给容器内 `journalctl`，可使用 `-u`、`--since`、`-n`、`-f` 筛选。journal 设置 `SystemMaxUse=256M` 和 `SystemMaxFileSize=16M`；journald 仅清理已归档文件，活跃文件可能使实际占用短暂超过 256 MiB。journal 存在容器可写层：停止、启动同一容器后仍可查询，删除并重建容器后消失。Detect 仍写到 `docker logs`，可用 `docker logs 26fly-runtime` 查看。ROS 自己写入 `/workspace/log/ros` 的文件，以及控制任务的 CSV、照片、视频仍在各自原有路径。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
+
+切换已有容器需要短暂停机并重建镜像和容器；容器可写层无法通过 `docker restart` 换成新镜像。先停止人工任务，再执行以下保留式迁移，沿用现有 build/install/log 卷，并保留旧容器供回退：
+
+```bash
+./scripts/build-image.sh
+docker stop 26fly-runtime
+docker rename 26fly-runtime 26fly-runtime-pre-journald
+./scripts/create-runtime.sh
+./scripts/start-runtime.sh
+./scripts/verify-runtime.sh
+./scripts/logs.sh -u micro-xrce-agent.service -n 20
+./scripts/logs.sh -u mavlink-routerd.service -n 20
+```
+
+上述命令只验证基础通信服务；相机和 Control 的日志需在人工启动对应任务后分别用 `-u 26fly-camera.service`、`-u 26fly-control.service` 查询。Control 仍需逐次授权。旧容器的 `docker logs` 历史留在已改名容器上，新容器的 journal 从创建时开始记录。
 
 Micro XRCE-DDS Agent v2.4.2 在同一个镜像中以 `UAGENT_USE_SYSTEM_FASTDDS=ON` 构建，直接链接 ROS Humble 的 Fast DDS 2.6/Fast CDR，避免 Agent 引入另一套 DDS 动态库。mavlink-router 固定为 v4。
 
