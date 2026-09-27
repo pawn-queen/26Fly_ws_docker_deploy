@@ -250,7 +250,7 @@ wait_for_topic_sample "${DETECT_CAMERA_INFO_TOPIC:-/camera/camera/color/camera_i
     "${camera_pid}" "${camera_deadline}"
 
 echo "[2/3] Starting headless detector..."
-start_component run-detect
+start_component run-detect -p "publish_debug_image:=true"
 detect_pid="${started_pid}"
 wait_for_observation_publisher "${detect_pid}" "$((SECONDS + 45))"
 
@@ -259,7 +259,8 @@ start_component vision-debug-viewer --ros-args \
     -p "color_topic:=${DETECT_COLOR_TOPIC:-/camera/camera/color/image_raw}" \
     -p "depth_topic:=${DETECT_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}" \
     -p "camera_info_topic:=${DETECT_CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}" \
-    -p "observation_topic:=/target_observation"
+    -p "observation_topic:=/target_observation" \
+    -p "annotated_topic:=/detect/debug/image"
 
 echo "Vision debug is running in DISPLAY=${DISPLAY}. Press q/Esc in the window or Ctrl-C here to stop."
 set +e

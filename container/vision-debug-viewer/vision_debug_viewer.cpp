@@ -35,6 +35,7 @@ using PointCloud = sensor_msgs::msg::PointCloud;
 constexpr char kWindowName[] = "26Fly RealSense / selected target debug";
 constexpr char kExpectedTargetFrame[] = "target_camera_optical_frame";
 constexpr std::size_t kFrameBufferLimit = 30;
+constexpr double kAnnotatedFrameMaxAgeS = 1.0;
 
 std::int64_t stamp_to_nanoseconds(const builtin_interfaces::msg::Time &stamp) {
   return static_cast<std::int64_t>(stamp.sec) * 1000000000LL +
@@ -98,7 +99,15 @@ struct Intrinsics {
 struct ColorFrame {
   std::int64_t stamp_ns{0};
   cv::Mat image;
+  std::string frame_id;
   Intrinsics intrinsics;
+};
+
+struct AnnotatedFrame {
+  std::int64_t stamp_ns{0};
+  cv::Mat image;
+  std::string frame_id;
+  SteadyClock::time_point received_at{};
 };
 
 struct DepthFrame {
@@ -125,6 +134,7 @@ public:
     declare_parameter<std::string>("camera_info_topic",
                                    "/camera/camera/color/camera_info");
     declare_parameter<std::string>("observation_topic", "/target_observation");
+    declare_parameter<std::string>("annotated_topic", "/detect/debug/image");
     declare_parameter<double>("target_timeout_s", 1.0);
     declare_parameter<double>("max_depth_m", 8.0);
     declare_parameter<double>("max_color_depth_skew_s", 0.04);
@@ -149,6 +159,10 @@ public:
     color_subscription_ = create_subscription<Image>(
         get_parameter("color_topic").as_string(), sensor_qos,
         std::bind(&VisionDebugViewer::on_color, this, std::placeholders::_1));
+    annotated_subscription_ = create_subscription<Image>(
+        get_parameter("annotated_topic").as_string(), sensor_qos,
+        std::bind(&VisionDebugViewer::on_annotated, this,
+                  std::placeholders::_1));
     depth_subscription_ = create_subscription<Image>(
         get_parameter("depth_topic").as_string(), sensor_qos,
         std::bind(&VisionDebugViewer::on_depth, this, std::placeholders::_1));
@@ -168,9 +182,8 @@ public:
     window_created_ = true;
     RCLCPP_INFO(
         get_logger(),
-        "Viewer started. It displays the selected target centre only; the "
-        "detector "
-        "does not publish bounding boxes or classes. Press q or Esc to exit.");
+        "Viewer started. Matched detector frames show all boxes and classes; "
+        "the selected target centre is overlaid. Press q or Esc to exit.");
   }
 
   ~VisionDebugViewer() override {
@@ -184,20 +197,40 @@ public:
 
   bool render() {
     cv::Mat color_view;
-    const ColorFrame *selected_color = nullptr;
+    const ColorFrame *selected_color =
+        color_frames_.empty() ? nullptr : &color_frames_.back();
+    const AnnotatedFrame *selected_annotation = nullptr;
     bool target_is_fresh = false;
     bool target_is_matched = false;
+    const auto now = SteadyClock::now();
 
-    if (!color_frames_.empty()) {
-      selected_color = &color_frames_.back();
+    // Prefer the latest fresh detector frame that matches a raw RGB frame.
+    for (auto annotated = annotated_frames_.rbegin();
+         annotated != annotated_frames_.rend(); ++annotated) {
+      const double age_s =
+          std::chrono::duration<double>(now - annotated->received_at).count();
+      if (age_s > kAnnotatedFrameMaxAgeS) {
+        continue;
+      }
+      const auto match = std::find_if(
+          color_frames_.rbegin(), color_frames_.rend(),
+          [&annotated](const ColorFrame &frame) {
+            return frame.stamp_ns == annotated->stamp_ns &&
+                   frame.frame_id == annotated->frame_id &&
+                   frame.image.size() == annotated->image.size();
+          });
+      if (match != color_frames_.rend()) {
+        selected_color = &(*match);
+        selected_annotation = &(*annotated);
+        break;
+      }
     }
 
     if (target_.has_value()) {
-      const double age_s = std::chrono::duration<double>(SteadyClock::now() -
-                                                         target_->received_at)
-                               .count();
+      const double age_s =
+          std::chrono::duration<double>(now - target_->received_at).count();
       target_is_fresh = age_s <= target_timeout_s_;
-      if (target_is_fresh) {
+      if (target_is_fresh && selected_annotation == nullptr) {
         const auto match =
             std::find_if(color_frames_.rbegin(), color_frames_.rend(),
                          [this](const ColorFrame &frame) {
@@ -205,9 +238,11 @@ public:
                          });
         if (match != color_frames_.rend()) {
           selected_color = &(*match);
-          target_is_matched = true;
         }
       }
+      target_is_matched =
+          target_is_fresh && selected_color != nullptr &&
+          selected_color->stamp_ns == target_->stamp_ns;
     }
 
     if (selected_color == nullptr) {
@@ -215,9 +250,11 @@ public:
       put_status_line(color_view, "Waiting for RealSense color frames...", 0,
                       cv::Scalar(0, 255, 255));
     } else {
-      color_view = selected_color->image.clone();
+      color_view = selected_annotation != nullptr
+                       ? selected_annotation->image.clone()
+                       : selected_color->image.clone();
       draw_target_overlay(color_view, *selected_color, target_is_fresh,
-                          target_is_matched);
+                          target_is_matched, selected_annotation != nullptr);
     }
 
     cv::Mat output = color_view;
@@ -295,6 +332,7 @@ private:
     try {
       ColorFrame frame;
       frame.stamp_ns = stamp_to_nanoseconds(message->header.stamp);
+      frame.frame_id = message->header.frame_id;
       frame.image =
           cv_bridge::toCvCopy(message, sensor_msgs::image_encodings::BGR8)
               ->image;
@@ -309,6 +347,26 @@ private:
     } catch (const std::exception &exception) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "Cannot convert color image: %s", exception.what());
+    }
+  }
+
+  void on_annotated(const Image::ConstSharedPtr message) {
+    try {
+      AnnotatedFrame frame;
+      frame.stamp_ns = stamp_to_nanoseconds(message->header.stamp);
+      frame.frame_id = message->header.frame_id;
+      frame.image =
+          cv_bridge::toCvCopy(message, sensor_msgs::image_encodings::BGR8)
+              ->image;
+      frame.received_at = SteadyClock::now();
+      annotated_frames_.push_back(std::move(frame));
+      while (annotated_frames_.size() > kFrameBufferLimit) {
+        annotated_frames_.pop_front();
+      }
+    } catch (const std::exception &exception) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "Cannot convert detector image: %s",
+                           exception.what());
     }
   }
 
@@ -394,9 +452,13 @@ private:
   }
 
   void draw_target_overlay(cv::Mat &image, const ColorFrame &frame,
-                           bool target_is_fresh, bool target_is_matched) const {
-    put_status_line(image, "RealSense color + detector output", 0,
-                    cv::Scalar(255, 255, 0));
+                           bool target_is_fresh, bool target_is_matched,
+                           bool annotated_is_matched) const {
+    put_status_line(image,
+                    annotated_is_matched
+                        ? "RealSense color + detector output"
+                        : "RealSense color (waiting for matched detector frame)",
+                    0, cv::Scalar(255, 255, 0));
     if (!target_is_fresh) {
       put_status_line(image, "NO RECENT TARGET", 1, cv::Scalar(0, 165, 255));
       return;
@@ -474,10 +536,12 @@ private:
   }
 
   rclcpp::Subscription<Image>::SharedPtr color_subscription_;
+  rclcpp::Subscription<Image>::SharedPtr annotated_subscription_;
   rclcpp::Subscription<Image>::SharedPtr depth_subscription_;
   rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_subscription_;
   rclcpp::Subscription<PointCloud>::SharedPtr observation_subscription_;
   std::deque<ColorFrame> color_frames_;
+  std::deque<AnnotatedFrame> annotated_frames_;
   std::deque<DepthFrame> depth_frames_;
   Intrinsics latest_intrinsics_;
   std::optional<TargetObservation> target_;

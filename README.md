@@ -202,15 +202,16 @@ echo "$DISPLAY"
 ./scripts/run-vision-debug.sh
 ```
 
-该入口一次启动 RealSense、无界面 detect 和独立的 C++ viewer。viewer 订阅彩色图、对齐深度、
-CameraInfo 与 `/target_observation`；detect 仍由原来的 `run-detect` 启动且保持
-`show_image=false`，所以关闭窗口、X11 断开或 viewer 异常不会进入 detect 的图像回调。
+该入口一次启动 RealSense、无界面 detect 和独立的 C++ viewer。调试会话为 detect 开启
+`publish_debug_image=true`，在 `/detect/debug/image` 发布带有全部 YOLO 检测框、类别和
+置信度的 RGB 图像；detect 仍保持 `show_image=false`，不会另开检测窗口。
 按 `q`、Esc 或在终端按 Ctrl-C 会结束本次调试入口拉起的三个进程。
 
-`/target_observation` 只提供被选中目标的三维中心点和置信度，不包含所有检测框或类别。
-因此 viewer 会按消息时间戳找到对应彩色帧，投影并标出选中目标中心，同时显示 XYZ、置信度
-和对齐深度；它不会伪造无法从现有 ROS 接口恢复的完整框。若检测消息与缓存图像时间戳不匹配，
-窗口明确显示 `UNMATCHED`，不会把旧目标画到最新帧。
+viewer 订阅原始彩色图、对齐深度、CameraInfo、`/detect/debug/image` 和
+`/target_observation`。只有标注图与原始彩色帧的时间戳、坐标帧和尺寸一致且标注图未过期时，
+才显示检测框；否则显示原始 RGB 图像。无检测结果时发布无框标注帧，避免旧框残留。
+`/target_observation` 仍只提供被选中目标的三维中心点和置信度；viewer 在匹配帧上投影
+绿色中心标记，并显示 XYZ 与对齐深度。
 
 调试入口仅接受本地形式的 X11 display（例如 `:1002`），每次动态读取当前 `$DISPLAY`，不会将
 会话编号写入容器配置。脚本用当前图形用户的 Xauthority cookie 创建容器内临时授权文件，
@@ -223,14 +224,16 @@ X11 socket bind 和 viewer 都属于容器创建/镜像内容。升级已有 run
 ```bash
 ./scripts/build-image.sh
 docker stop 26fly-runtime
-docker rename 26fly-runtime 26fly-runtime-pre-vision-gui
+docker rename 26fly-runtime 26fly-runtime-pre-debug-boxes
 ./scripts/create-runtime.sh
 ./scripts/start-runtime.sh
+./scripts/build-workspace.sh
 ./scripts/verify-runtime.sh
 ```
 
 本次变化不改变 workspace ABI，可继续使用 `.env` 中现有的 build/install/log named volumes。
-确认新容器的比赛路径和调试路径均正常前，保留改名后的旧容器以便回退。
+检测节点源码已更新，因此需要执行 `build-workspace.sh` 刷新 install volume。确认新容器的
+比赛路径和调试路径均正常前，保留改名后的旧容器以便回退。
 
 必须先保持 `run-camera.sh` 与 `run-detect.sh` 正常运行，再启动控制。`fly_A.sh` 会等待并检查彩色图、对齐深度、相机内参的近期样本，以及 `yolov5_ros2` 对 `/target_observation` 的 publisher；视觉链不完整时拒绝进入控制程序。
 
