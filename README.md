@@ -111,7 +111,7 @@ RealSense 由 USB 驱动按设备识别，配置只检查名称中包含 `RealSe
 
 只有 Dockerfile、apt/requirements、`container/` 启动与验证脚本、systemd unit 或底层 ABI 改变时才构建新镜像，并进行一次明确的容器迁移。本版本同时更新容器脚本并新增 `/home/pixel/flylogs` 持久化兼容链接，因此从旧镜像迁移时必须重新 build；源码、`.engine` 和 `config/runtime.env` 的日常变化不需要重建镜像。
 
-`HOST_WS_SRC`、`VOLUME_PREFIX` 和 bind/named-volume 挂载都在 `docker create` 时确定。本次从 archive 切换到 `26Season_Fly_ws_jetson`，已有容器必须保留式迁移；仅修改 `.env` 或重新 build 镜像不会改变旧容器挂载。先保留旧容器，再创建新的：
+`HOST_WS_SRC`、`VOLUME_PREFIX` 和 bind/named-volume 挂载都在 `docker create` 时确定。本次从 archive 切换到 `26Season_Fly_ws_jetson`，已有容器必须保留式迁移；仅修改 `.env` 或重新 build 镜像不会改变旧容器挂载。迁移期间先保留旧容器，再创建并验证新的；新容器测试通过后删除已改名的旧容器：
 
 ```bash
 ./scripts/build-image.sh
@@ -121,9 +121,11 @@ docker rename 26fly-runtime 26fly-runtime-pre-jetson-workspace
 ./scripts/start-runtime.sh
 ./scripts/build-workspace.sh
 ./scripts/verify-runtime.sh
+# 完成本次升级涉及的全部测试并确认通过后
+docker rm 26fly-runtime-pre-jetson-workspace
 ```
 
-新的 `VOLUME_PREFIX` 会创建一套干净的 build/install/log named volume，避免旧版 `px4_msgs` 生成物混入；旧容器仍保留并引用旧 volume。确认新版稳定前不要删除备份容器或旧 volume。
+新的 `VOLUME_PREFIX` 会创建一套干净的 build/install/log named volume，避免旧版 `px4_msgs` 生成物混入。确认新版稳定前不要删除备份容器；测试通过后必须删除备份容器，避免残留无用容器。`docker rm` 不会删除旧 named volume；旧 volume 是否清理应另行确认，不能随容器自动删除。
 
 ## 3. 操作容器内 systemd
 
@@ -148,7 +150,7 @@ systemctl status mavlink-routerd.service
 
 这些 `systemctl` 和 `journalctl` 命令连接的是容器内 systemd 与 journald，而不是宿主服务。最小 target 启动 journald 和 journal flush；MAVLink、Agent、Depth cam、Control 的 stdout/stderr 按 unit 存入 `/var/log/journal`。`scripts/logs.sh` 将参数原样交给容器内 `journalctl`，可使用 `-u`、`--since`、`-n`、`-f` 筛选。journal 设置 `SystemMaxUse=256M` 和 `SystemMaxFileSize=16M`；journald 仅清理已归档文件，活跃文件可能使实际占用短暂超过 256 MiB。journal 存在容器可写层：停止、启动同一容器后仍可查询，删除并重建容器后消失。Detect 仍写到 `docker logs`，可用 `docker logs 26fly-runtime` 查看。ROS 自己写入 `/workspace/log/ros` 的文件，以及控制任务的 CSV、照片、视频仍在各自原有路径。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
 
-切换已有容器需要短暂停机并重建镜像和容器；容器可写层无法通过 `docker restart` 换成新镜像。先停止人工任务，再执行以下保留式迁移，沿用现有 build/install/log 卷，并保留旧容器供回退：
+切换已有容器需要短暂停机并重建镜像和容器；容器可写层无法通过 `docker restart` 换成新镜像。先停止人工任务，再执行以下保留式迁移，沿用现有 build/install/log 卷。旧容器只在验证期间用于回退；新容器测试通过后必须删除：
 
 ```bash
 ./scripts/build-image.sh
@@ -159,9 +161,11 @@ docker rename 26fly-runtime 26fly-runtime-pre-journald
 ./scripts/verify-runtime.sh
 ./scripts/logs.sh -u micro-xrce-agent.service -n 20
 ./scripts/logs.sh -u mavlink-routerd.service -n 20
+# 完成本次升级涉及的全部测试并确认通过后
+docker rm 26fly-runtime-pre-journald
 ```
 
-上述命令只验证基础通信服务；相机和 Control 的日志需在人工启动对应任务后分别用 `-u 26fly-camera.service`、`-u 26fly-control.service` 查询。Control 仍需逐次授权。旧容器的 `docker logs` 历史留在已改名容器上，新容器的 journal 从创建时开始记录。
+上述命令只验证基础通信服务；相机和 Control 的日志需在人工启动对应任务后分别用 `-u 26fly-camera.service`、`-u 26fly-control.service` 查询。Control 仍需逐次授权。执行最后一条 `docker rm` 前，必须先完成本次升级涉及的全部测试并确认通过；删除后旧容器的 `docker logs` 历史不再保留，新容器的 journal 从创建时开始记录。
 
 Micro XRCE-DDS Agent v2.4.2 在同一个镜像中以 `UAGENT_USE_SYSTEM_FASTDDS=ON` 构建，直接链接 ROS Humble 的 Fast DDS 2.6/Fast CDR，避免 Agent 引入另一套 DDS 动态库。mavlink-router 固定为 v4。
 
@@ -229,11 +233,14 @@ docker rename 26fly-runtime 26fly-runtime-pre-debug-boxes
 ./scripts/start-runtime.sh
 ./scripts/build-workspace.sh
 ./scripts/verify-runtime.sh
+# 确认比赛路径和调试路径测试均通过后
+docker rm 26fly-runtime-pre-debug-boxes
 ```
 
 本次变化不改变 workspace ABI，可继续使用 `.env` 中现有的 build/install/log named volumes。
 检测节点源码已更新，因此需要执行 `build-workspace.sh` 刷新 install volume。确认新容器的
-比赛路径和调试路径均正常前，保留改名后的旧容器以便回退。
+比赛路径和调试路径均正常前，保留改名后的旧容器以便回退；两条路径测试通过后必须执行
+最后一条 `docker rm`，删除旧容器以保持环境整洁。
 
 必须先保持 `run-camera.sh` 与 `run-detect.sh` 正常运行，再启动控制。`fly_A.sh` 会等待并检查彩色图、对齐深度、相机内参的近期样本，以及 `yolov5_ros2` 对 `/target_observation` 的 publisher；视觉链不完整时拒绝进入控制程序。
 
