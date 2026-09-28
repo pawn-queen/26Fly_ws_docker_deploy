@@ -242,19 +242,24 @@ docker rm 26fly-runtime-pre-debug-boxes
 比赛路径和调试路径均正常前，保留改名后的旧容器以便回退；两条路径测试通过后必须执行
 最后一条 `docker rm`，删除旧容器以保持环境整洁。
 
-必须先保持 `run-camera.sh` 与 `run-detect.sh` 正常运行，再启动控制。`fly_A.sh` 会等待并检查彩色图、对齐深度、相机内参的近期样本，以及 `yolov5_ros2` 对 `/target_observation` 的 publisher；视觉链不完整时拒绝进入控制程序。
+启动控制前，应先在另一终端运行 `./start_camera.sh`：它先启动 camera，等待彩色图、对齐深度图及相机内参的样本，再启动 detect 并等待 `/target_observation` 的 publisher。当前 `pid_*.sh` 本身不重复执行这些视觉话题预检；有 publisher 也不等于已产生有效检测结果。
 
-真实控制必须由操作员逐次授权：
+真实控制必须由操作员在前台终端逐次确认，以下命令任选其一：
 
 ```bash
-ALLOW_FLIGHT_CONTROL=YES ./pid_132.sh
-或
-ALLOW_FLIGHT_CONTROL=YES ./pid_231.sh
-或
-ALLOW_FLIGHT_CONTROL=YES ./pid_213.sh
+./pid_132.sh
+./pid_231.sh
+./pid_213.sh
 ```
 
-任务前台运行 `control/0821auto.py`；进程退出表示任务结束，systemd 管理的两个通信服务和容器继续运行。许可只传给本次 `docker exec`，`config/runtime.env` 永久保持 `ALLOW_FLIGHT_CONTROL=NO`。
+脚本会先警告真实控制可能发送 Offboard、Arm 和舵机命令，并询问“是否继续启动ROS节点? (y/n): ”。
+仅输入 `y` 或 `Y` 才继续；其他输入、输入结束、非前台交互终端及提示期间 Ctrl-C 都不会启动控制。
+即使预先设置 `ALLOW_FLIGHT_CONTROL=YES`，也不能跳过询问。
+
+确认后，宿主脚本留在前台跟踪 `26fly-control.service`，Ctrl-C 仍通过 systemd 停止本次 control；
+通信服务和容器继续运行。宿主使用 `systemd-run --setenv` 仅为本次 transient unit 设置内部许可，
+容器入口再次核对；`config/runtime.env` 永久保持 `ALLOW_FLIGHT_CONTROL=NO`。此确认用于防止误启动，
+不代替 PX4 飞行前检查。
 
 停止和恢复整个运行环境：
 
