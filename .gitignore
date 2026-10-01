@@ -7,3 +7,6 @@ log/
 **/*.py[cod]
 models/*
 !models/README.md
+pid_132.sh
+pid_213.sh
+pid_231.sh
