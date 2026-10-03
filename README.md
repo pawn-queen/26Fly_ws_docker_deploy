@@ -195,52 +195,55 @@ RealSense 和实机检测在不同终端人工运行：
 检测入口固定为 `ros2 run detect detect`。控制包装器显式调用 `control.0821auto`，不依赖历史仿真入口。整个 `src` 是单一只读 bind mount；宿主 Git 更新会立即反映到容器。
 
 以上两个入口是比赛用无界面路径，语义保持固定：相机只发布 ROS topic，detect 固定使用
-`show_image=false`，不继承宿主 `DISPLAY`。比赛时不要改用下面的调试入口。
+`show_image=false`，不继承宿主 `DISPLAY`。比赛视觉任务仍通过这些入口启动。
 
-### 可选的 RealSense/detect GUI 调试
+### 已有任务的 RealSense 和广角图像显示
 
-调试时从 Jetson 当前图形桌面或远程桌面的终端运行：
+先按下方比赛流程启动 `./start_camera.sh` 和需要的控制任务，再从 Jetson 当前图形桌面或远程桌面的另一终端运行：
 
 ```bash
 echo "$DISPLAY"
 ./scripts/run-vision-debug.sh
 ```
 
-该入口一次启动 RealSense、无界面 detect 和独立的 C++ viewer。调试会话为 detect 开启
-`publish_debug_image=true`，在 `/detect/debug/image` 发布带有全部 YOLO 检测框、类别和
-置信度的 RGB 图像；detect 仍保持 `show_image=false`，不会另开检测窗口。
-按 `q`、Esc 或在终端按 Ctrl-C 会结束本次调试入口拉起的三个进程。
+无参数入口只启动独立的 C++ viewer，允许 camera、detect 和 control 已在运行；不会启动、重启或停止这些任务，也不会再次打开广角设备。显示使用两个独立窗口：RealSense RGB/深度和任务广角图像。在任一窗口按 `q`、Esc、点击关闭，或在显示终端按 Ctrl-C，会关闭两个显示窗口，任务继续运行。重新执行上述命令即可恢复显示。
 
-viewer 订阅原始彩色图、对齐深度、CameraInfo、`/detect/debug/image` 和
+RealSense 窗口订阅原始彩色图、对齐深度、CameraInfo、`/detect/debug/image` 和
 `/target_observation`。只有标注图与原始彩色帧的时间戳、坐标帧和尺寸一致且标注图未过期时，
-才显示检测框；否则显示原始 RGB 图像。无检测结果时发布无框标注帧，避免旧框残留。
+才显示检测框；否则显示原始 RGB 图像。比赛 detect 默认不发布标注图时，viewer 使用原始 RGB，不为打开显示而重启 detect。
 `/target_observation` 仍只提供被选中目标的三维中心点和置信度；viewer 在匹配帧上投影
 绿色中心标记，并显示 XYZ 与对齐深度。
 
+广角窗口订阅 control 发布的 `/control/widecam/image_raw`（最高 10 Hz）和 `/control/widecam/debug_image`。debug 是完整图像，保持现有 `GLOBAL_SEARCH`、`RECON_SEARCH` 阶段的识别框；其他状态发布原图，不扩大识别阶段。viewer 优先显示新鲜 debug，debug 缺失或过期时使用新鲜 raw，不要求两路图像时间戳相同。未收到有效图像时显示等待；超过 1 秒没有新鲜图像时显示 `STALE`，避免将冻结的画面误认为实时图像。任务关闭相机或停止图像发布后，窗口会进入等待或失效状态。
+
 调试入口仅接受本地形式的 X11 display（例如 `:1002`），每次动态读取当前 `$DISPLAY`，不会将
 会话编号写入容器配置。脚本用当前图形用户的 Xauthority cookie 创建容器内临时授权文件，
-不会执行 `xhost +`；因此不要用 `sudo` 启动它。调试入口会拒绝已有的 camera、detect 或 control，
-且不启动或预览广角相机。
+不会执行 `xhost +`；因此不要用 `sudo` 启动它。同一时间只允许一个图像显示会话。
 
-X11 socket bind 和 viewer 都属于容器创建/镜像内容。升级已有 runtime 时必须先构建镜像，再做
-一次保留式容器迁移；单纯 `docker restart` 不能给旧容器增加 mount：
+需要原先的独立 RealSense/detect 调试栈时，显式运行：
+
+```bash
+./scripts/run-vision-debug.sh --standalone
+```
+
+`--standalone` 会拒绝已有的 camera、detect 或 control，依次启动 RealSense、无界面 detect 和 viewer；为本次 detect 设置 `publish_debug_image=true`，保持 `show_image=false`。此模式只显示 RealSense，不启动或预览广角相机。退出会停止本会话启动的 camera、detect 和 viewer。
+
+首次升级这两个窗口和新的启动脚本时，先停止人工任务，再构建镜像并保留式迁移容器；viewer 和容器启动脚本属于镜像内容，单纯 `docker restart` 不会加载它们的新版，也不能给旧容器增加 X11 mount：
 
 ```bash
 ./scripts/build-image.sh
 docker stop 26fly-runtime
-docker rename 26fly-runtime 26fly-runtime-pre-debug-boxes
+docker rename 26fly-runtime 26fly-runtime-pre-wide-viewer
 ./scripts/create-runtime.sh
 ./scripts/start-runtime.sh
 ./scripts/build-workspace.sh
 ./scripts/verify-runtime.sh
-# 确认比赛路径和调试路径测试均通过后
-docker rm 26fly-runtime-pre-debug-boxes
+# 确认比赛任务、已有任务显示和 standalone 调试均通过后
+docker rm 26fly-runtime-pre-wide-viewer
 ```
 
 本次变化不改变 workspace ABI，可继续使用 `.env` 中现有的 build/install/log named volumes。
-检测节点源码已更新，因此需要执行 `build-workspace.sh` 刷新 install volume。确认新容器的
-比赛路径和调试路径均正常前，保留改名后的旧容器以便回退；两条路径测试通过后必须执行
-最后一条 `docker rm`，删除旧容器以保持环境整洁。
+广角图像发布来自相邻源码仓库 `26Season_Fly_ws_jetson/src/fly/control/0821auto.py`，通过 `/workspace/src` 只读挂载和 Python symlink install 加载。首次升级执行 `build-workspace.sh` 刷新 install volume，并在之后重新启动控制任务；已运行的旧控制进程不会自动加载新源码。后续普通 Python 函数修改通常只需重启相应任务，C++ viewer 或 `container/` 脚本修改仍需重建镜像和迁移容器。确认三条路径均正常前，保留改名后的旧容器以便回退；验证通过后再删除旧容器。
 
 启动控制前，应先在另一终端运行 `./start_camera.sh`：它先启动 camera，等待彩色图、对齐深度图及相机内参的样本，再启动 detect 并等待 `/target_observation` 的 publisher。当前 `pid_*.sh` 本身不重复执行这些视觉话题预检；有 publisher 也不等于已产生有效检测结果。
 

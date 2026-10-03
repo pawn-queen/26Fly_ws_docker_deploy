@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+usage() {
+    cat <<'EOF'
+Usage: run-vision-debug.sh [--standalone]
+  No arguments: display existing task images; do not start or stop task processes.
+  --standalone: start an isolated RealSense/detect debug stack.
+EOF
+}
+
+debug_mode=viewer
+if (( $# > 1 )); then
+    usage >&2
+    exit 64
+fi
+case "${1:-}" in
+    "") ;;
+    --standalone) debug_mode=standalone ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 64 ;;
+esac
+
 # shellcheck disable=SC1091
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/runtime.sh"
 load_runtime_settings
@@ -125,13 +145,19 @@ if ! printf '%s\n' "${authority_records}" | sed 's/^..../ffff/' | \
 fi
 docker exec "${CONTAINER_NAME}" chmod 0600 "${container_xauthority}"
 
-echo "Starting RealSense-only GUI debug session ${session_id}; the IMX577 wide camera is not part of this stack."
+debug_runner_args=("${session_id}")
+if [[ "${debug_mode}" == "standalone" ]]; then
+    debug_runner_args=(--standalone "${session_id}")
+    echo "Starting standalone RealSense GUI debug session ${session_id}."
+else
+    echo "Displaying existing RealSense and wide-camera task images in session ${session_id}; task processes stay running."
+fi
 set +e
 setsid --fork --wait docker exec \
     --env "DISPLAY=${DISPLAY}" \
     --env "XAUTHORITY=${container_xauthority}" \
     --env QT_X11_NO_MITSHM=1 \
-    "${CONTAINER_NAME}" run-vision-debug "${session_id}" &
+    "${CONTAINER_NAME}" run-vision-debug "${debug_runner_args[@]}" &
 debug_exec_pid=$!
 debug_session_started=true
 

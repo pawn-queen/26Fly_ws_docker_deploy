@@ -1,16 +1,34 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# shellcheck disable=SC1091
-source /usr/local/lib/26fly/env.sh
+usage() {
+    cat <<'EOF'
+Usage: run-vision-debug [--standalone] [session-id]
+       run-vision-debug --stop [session-id]
+  No mode flag: display existing task images without starting task processes.
+  --standalone: start an isolated RealSense/detect debug stack.
+EOF
+}
 
 mode=run
-if [[ "${1:-}" == "--stop" ]]; then
-    mode=stop
-    shift
-fi
+debug_mode=viewer
+case "${1:-}" in
+    --stop) mode=stop; shift ;;
+    --standalone) debug_mode=standalone; shift ;;
+    --help|-h)
+        if (( $# != 1 )); then usage >&2; exit 64; fi
+        usage
+        exit 0
+        ;;
+    --*) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 64 ;;
+esac
 if (( $# > 1 )); then
-    echo "ERROR: usage: run-vision-debug [--stop] [session-id]" >&2
+    usage >&2
+    exit 64
+fi
+if [[ "${1:-}" == -* ]]; then
+    echo "ERROR: unknown argument: $1" >&2
+    usage >&2
     exit 64
 fi
 
@@ -19,6 +37,9 @@ if [[ ! "${session_id}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
     echo "ERROR: invalid debug session id: ${session_id}" >&2
     exit 2
 fi
+# shellcheck disable=SC1091
+source /usr/local/lib/26fly/env.sh
+
 state_dir=/run/lock/26fly-vision-debug
 state_file="${state_dir}/${session_id}.pid"
 
@@ -77,7 +98,7 @@ if [[ -z "${DISPLAY:-}" || -z "${XAUTHORITY:-}" || ! -r "${XAUTHORITY}" ]]; then
     echo "ERROR: DISPLAY/XAUTHORITY was not prepared by the host debug wrapper." >&2
     exit 2
 fi
-if [[ ! -f /workspace/install/local_setup.bash ]]; then
+if [[ "${debug_mode}" == "standalone" && ! -f /workspace/install/local_setup.bash ]]; then
     echo "ERROR: workspace is not built. Run ./scripts/build-workspace.sh on the host." >&2
     exit 2
 fi
@@ -99,12 +120,20 @@ process_group_is_alive() {
     kill -0 -- "-$1" 2>/dev/null
 }
 
+direct_child_is_alive() {
+    local parent_pid
+    parent_pid="$(ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]')"
+    [[ "${parent_pid}" == "$$" ]]
+}
+
 cleanup() {
     local pid deadline any_alive state_pid state_extra
     trap - EXIT INT TERM HUP
     for pid in "${child_pids[@]}"; do
         if process_group_is_alive "${pid}"; then
             kill -TERM -- "-${pid}" 2>/dev/null || true
+        elif direct_child_is_alive "${pid}"; then
+            kill -TERM "${pid}" 2>/dev/null || true
         fi
     done
 
@@ -112,7 +141,7 @@ cleanup() {
     while (( SECONDS < deadline )); do
         any_alive=false
         for pid in "${child_pids[@]}"; do
-            if process_group_is_alive "${pid}"; then
+            if process_group_is_alive "${pid}" || direct_child_is_alive "${pid}"; then
                 any_alive=true
                 break
             fi
@@ -126,6 +155,8 @@ cleanup() {
     for pid in "${child_pids[@]}"; do
         if process_group_is_alive "${pid}"; then
             kill -KILL -- "-${pid}" 2>/dev/null || true
+        elif direct_child_is_alive "${pid}"; then
+            kill -KILL "${pid}" 2>/dev/null || true
         fi
         wait "${pid}" 2>/dev/null || true
     done
@@ -148,22 +179,24 @@ mkdir -p -- "${state_dir}"
 (umask 077; printf '%s\n' "$$" > "${state_file}.tmp.$$")
 mv -f -- "${state_file}.tmp.$$" "${state_file}"
 
-existing_nodes="$(timeout 5s ros2 node list 2>/dev/null || true)"
-for forbidden_node in /camera/camera /yolov5_ros2 /offboard_control_takeoff_and_land; do
-    if grep -Fxq -- "${forbidden_node}" <<< "${existing_nodes}"; then
-        echo "REFUSED: ROS node already exists: ${forbidden_node}" >&2
-        echo "Stop the existing camera/detect/control process before starting the debug stack." >&2
+if [[ "${debug_mode}" == "standalone" ]]; then
+    existing_nodes="$(timeout 5s ros2 node list 2>/dev/null || true)"
+    for forbidden_node in /camera/camera /yolov5_ros2 /offboard_control_takeoff_and_land; do
+        if grep -Fxq -- "${forbidden_node}" <<< "${existing_nodes}"; then
+            echo "REFUSED: ROS node already exists: ${forbidden_node}" >&2
+            echo "Stop the existing camera/detect/control process before starting the standalone debug stack." >&2
+            exit 3
+        fi
+    done
+
+    process_conflicts="$({
+        pgrep -a -f 'ros2 launch realsense2_camera|realsense2_camera_node|ros2 run detect detect|/install/detect/lib/detect/detect|detect[.]detect_ros|control[.]0821auto' || true
+    } 2>/dev/null)"
+    if [[ -n "${process_conflicts}" ]]; then
+        echo "REFUSED: an existing camera, detector, or control process may own this stack:" >&2
+        printf '%s\n' "${process_conflicts}" >&2
         exit 3
     fi
-done
-
-process_conflicts="$({
-    pgrep -a -f 'ros2 launch realsense2_camera|realsense2_camera_node|ros2 run detect detect|/install/detect/lib/detect/detect|detect[.]detect_ros|control[.]0821auto' || true
-} 2>/dev/null)"
-if [[ -n "${process_conflicts}" ]]; then
-    echo "REFUSED: an existing camera, detector, or control process may own this stack:" >&2
-    printf '%s\n' "${process_conflicts}" >&2
-    exit 3
 fi
 
 if ! timeout --signal=TERM --kill-after=2s 8s vision-debug-viewer --probe-gui; then
@@ -175,10 +208,12 @@ start_component() {
     local pgid=
     setsid "$@" 9>&- &
     started_pid=$!
+    # Register before polling: a stop can arrive after the child starts but
+    # before its process-group check completes.
+    child_pids+=("${started_pid}")
     for _ in {1..20}; do
         pgid="$(ps -o pgid= -p "${started_pid}" 2>/dev/null | tr -d '[:space:]')"
         if [[ "${pgid}" == "${started_pid}" ]]; then
-            child_pids+=("${started_pid}")
             return 0
         fi
         if ! kill -0 "${started_pid}" 2>/dev/null; then
@@ -237,39 +272,53 @@ wait_for_observation_publisher() {
     return 1
 }
 
-echo "[1/3] Starting RealSense (this debug stack does not start or preview the IMX577 wide camera)..."
-start_component run-camera
-camera_pid="${started_pid}"
+display_wide=true
+if [[ "${debug_mode}" == "standalone" ]]; then
+    display_wide=false
+    echo "[1/3] Starting standalone RealSense (the IMX577 wide camera is not part of this stack)..."
+    start_component run-camera
+    camera_pid="${started_pid}"
 
-camera_deadline=$((SECONDS + 60))
-wait_for_topic_sample "${DETECT_COLOR_TOPIC:-/camera/camera/color/image_raw}" \
-    "${camera_pid}" "${camera_deadline}"
-wait_for_topic_sample "${DETECT_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}" \
-    "${camera_pid}" "${camera_deadline}"
-wait_for_topic_sample "${DETECT_CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}" \
-    "${camera_pid}" "${camera_deadline}"
+    camera_deadline=$((SECONDS + 60))
+    wait_for_topic_sample "${DETECT_COLOR_TOPIC:-/camera/camera/color/image_raw}" \
+        "${camera_pid}" "${camera_deadline}"
+    wait_for_topic_sample "${DETECT_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}" \
+        "${camera_pid}" "${camera_deadline}"
+    wait_for_topic_sample "${DETECT_CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}" \
+        "${camera_pid}" "${camera_deadline}"
 
-echo "[2/3] Starting headless detector..."
-start_component run-detect -p "publish_debug_image:=true"
-detect_pid="${started_pid}"
-wait_for_observation_publisher "${detect_pid}" "$((SECONDS + 45))"
-
-echo "[3/3] Starting decoupled debug viewer..."
+    echo "[2/3] Starting headless detector..."
+    start_component run-detect -p "publish_debug_image:=true"
+    detect_pid="${started_pid}"
+    wait_for_observation_publisher "${detect_pid}" "$((SECONDS + 45))"
+    echo "[3/3] Starting standalone debug viewer..."
+else
+    echo "Starting viewer for existing task images; camera, detect and control processes are left running."
+fi
 start_component vision-debug-viewer --ros-args \
     -p "color_topic:=${DETECT_COLOR_TOPIC:-/camera/camera/color/image_raw}" \
     -p "depth_topic:=${DETECT_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}" \
     -p "camera_info_topic:=${DETECT_CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}" \
     -p "observation_topic:=/target_observation" \
-    -p "annotated_topic:=/detect/debug/image"
+    -p "annotated_topic:=/detect/debug/image" \
+    -p "display_wide:=${display_wide}" \
+    -p "wide_raw_topic:=/control/widecam/image_raw" \
+    -p "wide_debug_topic:=/control/widecam/debug_image"
 
-echo "Vision debug is running in DISPLAY=${DISPLAY}. Press q/Esc in the window or Ctrl-C here to stop."
+if [[ "${debug_mode}" == "standalone" ]]; then
+    echo "Standalone debug is running in DISPLAY=${DISPLAY}. Press q/Esc or Ctrl-C to stop this camera/detect/viewer stack."
+else
+    echo "Task display is running in DISPLAY=${DISPLAY}. Close either window, press q/Esc or Ctrl-C to stop only the viewer."
+fi
 set +e
 wait -n "${child_pids[@]}"
 component_status=$?
 set -e
 if (( component_status != 0 )); then
-    echo "ERROR: a debug-stack component exited with status ${component_status}." >&2
+    echo "ERROR: a ${debug_mode} debug component exited with status ${component_status}." >&2
+elif [[ "${debug_mode}" == "standalone" ]]; then
+    echo "A standalone debug component exited; stopping the remaining session components."
 else
-    echo "A debug-stack component exited; stopping the remaining components."
+    echo "Task viewer exited; existing task processes stay running."
 fi
 exit "${component_status}"

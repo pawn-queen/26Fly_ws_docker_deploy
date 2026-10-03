@@ -10,3 +10,8 @@ models/*
 pid_132.sh
 pid_213.sh
 pid_231.sh
+
+# Local validation files are not required by the runtime.
+/tests/
+/container/vision-debug-viewer/test_wide_display_state.cpp
+.pytest_cache/

@@ -25,6 +25,8 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud.hpp>
 
+#include "wide_display_state.hpp"
+
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
@@ -33,9 +35,11 @@ using CameraInfo = sensor_msgs::msg::CameraInfo;
 using PointCloud = sensor_msgs::msg::PointCloud;
 
 constexpr char kWindowName[] = "26Fly RealSense / selected target debug";
+constexpr char kWideWindowName[] = "26Fly Wide camera / mission debug";
 constexpr char kExpectedTargetFrame[] = "target_camera_optical_frame";
 constexpr std::size_t kFrameBufferLimit = 30;
 constexpr double kAnnotatedFrameMaxAgeS = 1.0;
+constexpr double kWideFrameMaxAgeS = 1.0;
 
 std::int64_t stamp_to_nanoseconds(const builtin_interfaces::msg::Time &stamp) {
   return static_cast<std::int64_t>(stamp.sec) * 1000000000LL +
@@ -124,6 +128,11 @@ struct TargetObservation {
   SteadyClock::time_point received_at{};
 };
 
+struct WideFrame {
+  cv::Mat image;
+  SteadyClock::time_point received_at{};
+};
+
 class VisionDebugViewer final : public rclcpp::Node {
 public:
   VisionDebugViewer() : Node("vision_debug_viewer") {
@@ -139,12 +148,18 @@ public:
     declare_parameter<double>("max_depth_m", 8.0);
     declare_parameter<double>("max_color_depth_skew_s", 0.04);
     declare_parameter<bool>("display_depth", true);
+    declare_parameter<bool>("display_wide", false);
+    declare_parameter<std::string>("wide_raw_topic",
+                                   "/control/widecam/image_raw");
+    declare_parameter<std::string>("wide_debug_topic",
+                                   "/control/widecam/debug_image");
 
     target_timeout_s_ = get_parameter("target_timeout_s").as_double();
     max_depth_m_ = get_parameter("max_depth_m").as_double();
     const double max_color_depth_skew_s =
         get_parameter("max_color_depth_skew_s").as_double();
     display_depth_ = get_parameter("display_depth").as_bool();
+    display_wide_ = get_parameter("display_wide").as_bool();
     if (!finite_positive(target_timeout_s_) || !finite_positive(max_depth_m_) ||
         !std::isfinite(max_color_depth_skew_s) ||
         max_color_depth_skew_s < 0.0 || max_color_depth_skew_s > 10.0) {
@@ -178,24 +193,50 @@ public:
         std::bind(&VisionDebugViewer::on_observation, this,
                   std::placeholders::_1));
 
+    if (display_wide_) {
+      auto wide_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+      wide_qos.best_effort().durability_volatile();
+      wide_raw_subscription_ = create_subscription<Image>(
+          get_parameter("wide_raw_topic").as_string(), wide_qos,
+          [this](const Image::ConstSharedPtr message) {
+            on_wide_image(message, wide_raw_frame_, "raw");
+          });
+      wide_debug_subscription_ = create_subscription<Image>(
+          get_parameter("wide_debug_topic").as_string(), wide_qos,
+          [this](const Image::ConstSharedPtr message) {
+            on_wide_image(message, wide_debug_frame_, "debug");
+          });
+    }
+
     cv::namedWindow(kWindowName, cv::WINDOW_NORMAL);
     window_created_ = true;
+    if (display_wide_) {
+      try {
+        cv::namedWindow(kWideWindowName, cv::WINDOW_NORMAL);
+        wide_window_created_ = true;
+      } catch (...) {
+        destroy_window(kWindowName, window_created_);
+        throw;
+      }
+    }
     RCLCPP_INFO(
         get_logger(),
         "Viewer started. Matched detector frames show all boxes and classes; "
-        "the selected target centre is overlaid. Press q or Esc to exit.");
+        "the selected target centre is overlaid. Wide camera display: %s. "
+        "Press q or Esc, or close either window, to exit.",
+        display_wide_ ? "enabled" : "disabled");
   }
 
   ~VisionDebugViewer() override {
-    if (window_created_) {
-      try {
-        cv::destroyWindow(kWindowName);
-      } catch (const cv::Exception &) {
-      }
-    }
+    destroy_window(kWideWindowName, wide_window_created_);
+    destroy_window(kWindowName, window_created_);
   }
 
   bool render() {
+    // Check before imshow: imshow can recreate a window that the user closed.
+    if (!windows_are_open()) {
+      return false;
+    }
     cv::Mat color_view;
     const ColorFrame *selected_color =
         color_frames_.empty() ? nullptr : &color_frames_.back();
@@ -284,29 +325,96 @@ public:
     }
 
     cv::imshow(kWindowName, output);
+    if (display_wide_) {
+      cv::imshow(kWideWindowName, wide_output(now));
+    }
     const int key = cv::waitKey(1) & 0xff;
     if (key == 'q' || key == 27) {
       return false;
     }
-    try {
-      const double visibility =
-          cv::getWindowProperty(kWindowName, cv::WND_PROP_VISIBLE);
-      if (visibility >= 1.0) {
-        window_was_visible_ = true;
-        return true;
-      }
-      if (visibility < 0.0) {
-        return true;
-      }
-      return !window_was_visible_;
-    } catch (const cv::Exception &exception) {
-      RCLCPP_WARN(get_logger(), "Debug window was closed: %s",
-                  exception.what());
-      return false;
-    }
+    return windows_are_open();
   }
 
 private:
+  static void destroy_window(const char *name, bool &created) noexcept {
+    if (!created) {
+      return;
+    }
+    try {
+      cv::destroyWindow(name);
+    } catch (const cv::Exception &) {
+    }
+    created = false;
+  }
+
+  bool window_is_open(const char *name, bool &was_visible) {
+    try {
+      return vision_debug::window_is_open(
+          cv::getWindowProperty(name, cv::WND_PROP_VISIBLE), was_visible);
+    } catch (const cv::Exception &exception) {
+      if (was_visible) {
+        RCLCPP_INFO(get_logger(), "Debug window closed: %s (%s)", name,
+                    exception.what());
+        return false;
+      }
+      return true;
+    }
+  }
+
+  bool windows_are_open() {
+    return window_is_open(kWindowName, window_was_visible_) &&
+           (!display_wide_ ||
+            window_is_open(kWideWindowName, wide_window_was_visible_));
+  }
+
+  cv::Mat wide_output(SteadyClock::time_point now) const {
+    const auto choice = vision_debug::choose_wide_frame(
+        wide_raw_frame_.has_value()
+            ? std::make_optional(wide_raw_frame_->received_at)
+            : std::nullopt,
+        wide_debug_frame_.has_value()
+            ? std::make_optional(wide_debug_frame_->received_at)
+            : std::nullopt,
+        now, kWideFrameMaxAgeS);
+    if (choice.source == vision_debug::WideFrameSource::Debug) {
+      return wide_debug_frame_->image;
+    }
+    if (choice.source == vision_debug::WideFrameSource::Raw) {
+      return wide_raw_frame_->image;
+    }
+    cv::Mat output = cv::Mat::zeros(480, 640, CV_8UC3);
+    if (choice.source == vision_debug::WideFrameSource::Waiting) {
+      put_status_line(output, "Waiting for wide camera mission frames...", 0,
+                      cv::Scalar(0, 255, 255));
+    } else {
+      put_status_line(output,
+                      cv::format("STALE - last wide frame %.1f s ago",
+                                 choice.age_s),
+                      0, cv::Scalar(0, 165, 255));
+    }
+    return output;
+  }
+
+  void on_wide_image(const Image::ConstSharedPtr message,
+                     std::optional<WideFrame> &destination,
+                     const char *source_name) {
+    try {
+      WideFrame next;
+      next.image =
+          cv_bridge::toCvCopy(message, sensor_msgs::image_encodings::BGR8)
+              ->image;
+      if (next.image.empty()) {
+        throw std::invalid_argument("image has no pixels");
+      }
+      next.received_at = SteadyClock::now();
+      destination = std::move(next);
+    } catch (const std::exception &exception) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "Cannot convert wide %s image: %s", source_name,
+                           exception.what());
+    }
+  }
+
   void on_camera_info(const CameraInfo::ConstSharedPtr message) {
     Intrinsics next;
     next.fx = message->k[0];
@@ -540,17 +648,24 @@ private:
   rclcpp::Subscription<Image>::SharedPtr depth_subscription_;
   rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_subscription_;
   rclcpp::Subscription<PointCloud>::SharedPtr observation_subscription_;
+  rclcpp::Subscription<Image>::SharedPtr wide_raw_subscription_;
+  rclcpp::Subscription<Image>::SharedPtr wide_debug_subscription_;
   std::deque<ColorFrame> color_frames_;
   std::deque<AnnotatedFrame> annotated_frames_;
   std::deque<DepthFrame> depth_frames_;
   Intrinsics latest_intrinsics_;
   std::optional<TargetObservation> target_;
+  std::optional<WideFrame> wide_raw_frame_;
+  std::optional<WideFrame> wide_debug_frame_;
   double target_timeout_s_{1.0};
   double max_depth_m_{8.0};
   std::int64_t max_color_depth_skew_ns_{40000000};
   bool display_depth_{true};
+  bool display_wide_{false};
   bool window_created_{false};
   bool window_was_visible_{false};
+  bool wide_window_created_{false};
+  bool wide_window_was_visible_{false};
 };
 
 } // namespace
