@@ -197,7 +197,7 @@ RealSense 和实机检测在不同终端人工运行：
 以上两个入口是比赛用无界面路径，语义保持固定：相机只发布 ROS topic，detect 固定使用
 `show_image=false`，不继承宿主 `DISPLAY`。比赛视觉任务仍通过这些入口启动。
 
-### 已有任务的 RealSense 和广角图像显示
+### 已有任务的 RealSense RGB 和广角图像显示
 
 先按下方比赛流程启动 `./start_camera.sh` 和需要的控制任务，再从 Jetson 当前图形桌面或远程桌面的另一终端运行：
 
@@ -206,13 +206,13 @@ echo "$DISPLAY"
 ./scripts/run-vision-debug.sh
 ```
 
-无参数入口只启动独立的 C++ viewer，允许 camera、detect 和 control 已在运行；不会启动、重启或停止这些任务，也不会再次打开广角设备。显示使用两个独立窗口：RealSense RGB/深度和任务广角图像。在任一窗口按 `q`、Esc、点击关闭，或在显示终端按 Ctrl-C，会关闭两个显示窗口，任务继续运行。重新执行上述命令即可恢复显示。
+无参数入口只启动独立的 C++ viewer，允许 camera、detect 和 control 已在运行；不会启动、重启或停止这些任务，也不会再次打开广角设备。显示使用两个独立窗口：RealSense RGB 窗口和广角窗口。在任一窗口按 `q`、Esc、点击关闭，或在显示终端按 Ctrl-C，会关闭两个显示窗口，任务继续运行。重新执行上述命令即可恢复显示。
 
-RealSense 窗口订阅原始彩色图、对齐深度、CameraInfo、`/detect/debug/image` 和
+RealSense RGB 窗口订阅原始彩色图、CameraInfo、`/detect/debug/image` 和
 `/target_observation`。只有标注图与原始彩色帧的时间戳、坐标帧和尺寸一致且标注图未过期时，
 才显示检测框；否则显示原始 RGB 图像。比赛 detect 默认不发布标注图时，viewer 使用原始 RGB，不为打开显示而重启 detect。
 `/target_observation` 仍只提供被选中目标的三维中心点和置信度；viewer 在匹配帧上投影
-绿色中心标记，并显示 XYZ 与对齐深度。
+绿色中心标记，并显示 XYZ。viewer 不订阅或预览深度图；RealSense 仍发布对齐深度，detect 仍用它计算目标三维坐标，比赛启动流程的深度就绪检查也保留。
 
 广角窗口订阅 control 发布的 `/control/widecam/image_raw`（最高 10 Hz）和 `/control/widecam/debug_image`。debug 是完整图像，保持现有 `GLOBAL_SEARCH`、`RECON_SEARCH` 阶段的识别框；其他状态发布原图，不扩大识别阶段。viewer 优先显示新鲜 debug，debug 缺失或过期时使用新鲜 raw，不要求两路图像时间戳相同。未收到有效图像时显示等待；超过 1 秒没有新鲜图像时显示 `STALE`，避免将冻结的画面误认为实时图像。任务关闭相机或停止图像发布后，窗口会进入等待或失效状态。
 
@@ -226,7 +226,7 @@ RealSense 窗口订阅原始彩色图、对齐深度、CameraInfo、`/detect/deb
 ./scripts/run-vision-debug.sh --standalone
 ```
 
-`--standalone` 会拒绝已有的 camera、detect 或 control，依次启动 RealSense、无界面 detect 和 viewer；为本次 detect 设置 `publish_debug_image=true`，保持 `show_image=false`。此模式只显示 RealSense，不启动或预览广角相机。退出会停止本会话启动的 camera、detect 和 viewer。
+`--standalone` 会拒绝已有的 camera、detect 或 control，依次启动 RealSense、无界面 detect 和 viewer；为本次 detect 设置 `publish_debug_image=true`，保持 `show_image=false`。此模式只显示 RealSense RGB，不预览深度图或广角相机；启动 detect 前仍等待 RGB、对齐深度和内参样本。退出会停止本会话启动的 camera、detect 和 viewer。
 
 首次升级这两个窗口和新的启动脚本时，先停止人工任务，再构建镜像并保留式迁移容器；viewer 和容器启动脚本属于镜像内容，单纯 `docker restart` 不会加载它们的新版，也不能给旧容器增加 X11 mount：
 

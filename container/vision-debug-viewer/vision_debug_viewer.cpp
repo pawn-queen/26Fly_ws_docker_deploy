@@ -7,7 +7,6 @@
 #include <exception>
 #include <functional>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -114,11 +113,6 @@ struct AnnotatedFrame {
   SteadyClock::time_point received_at{};
 };
 
-struct DepthFrame {
-  std::int64_t stamp_ns{0};
-  cv::Mat metres;
-};
-
 struct TargetObservation {
   std::int64_t stamp_ns{0};
   double x{0.0};
@@ -138,16 +132,11 @@ public:
   VisionDebugViewer() : Node("vision_debug_viewer") {
     declare_parameter<std::string>("color_topic",
                                    "/camera/camera/color/image_raw");
-    declare_parameter<std::string>(
-        "depth_topic", "/camera/camera/aligned_depth_to_color/image_raw");
     declare_parameter<std::string>("camera_info_topic",
                                    "/camera/camera/color/camera_info");
     declare_parameter<std::string>("observation_topic", "/target_observation");
     declare_parameter<std::string>("annotated_topic", "/detect/debug/image");
     declare_parameter<double>("target_timeout_s", 1.0);
-    declare_parameter<double>("max_depth_m", 8.0);
-    declare_parameter<double>("max_color_depth_skew_s", 0.04);
-    declare_parameter<bool>("display_depth", true);
     declare_parameter<bool>("display_wide", false);
     declare_parameter<std::string>("wide_raw_topic",
                                    "/control/widecam/image_raw");
@@ -155,20 +144,10 @@ public:
                                    "/control/widecam/debug_image");
 
     target_timeout_s_ = get_parameter("target_timeout_s").as_double();
-    max_depth_m_ = get_parameter("max_depth_m").as_double();
-    const double max_color_depth_skew_s =
-        get_parameter("max_color_depth_skew_s").as_double();
-    display_depth_ = get_parameter("display_depth").as_bool();
     display_wide_ = get_parameter("display_wide").as_bool();
-    if (!finite_positive(target_timeout_s_) || !finite_positive(max_depth_m_) ||
-        !std::isfinite(max_color_depth_skew_s) ||
-        max_color_depth_skew_s < 0.0 || max_color_depth_skew_s > 10.0) {
-      throw std::invalid_argument(
-          "target_timeout_s and max_depth_m must be positive, and "
-          "max_color_depth_skew_s must be finite and between 0 and 10 seconds");
+    if (!finite_positive(target_timeout_s_)) {
+      throw std::invalid_argument("target_timeout_s must be positive");
     }
-    max_color_depth_skew_ns_ =
-        static_cast<std::int64_t>(std::llround(max_color_depth_skew_s * 1e9));
 
     const auto sensor_qos = rclcpp::SensorDataQoS().keep_last(5);
     color_subscription_ = create_subscription<Image>(
@@ -178,9 +157,6 @@ public:
         get_parameter("annotated_topic").as_string(), sensor_qos,
         std::bind(&VisionDebugViewer::on_annotated, this,
                   std::placeholders::_1));
-    depth_subscription_ = create_subscription<Image>(
-        get_parameter("depth_topic").as_string(), sensor_qos,
-        std::bind(&VisionDebugViewer::on_depth, this, std::placeholders::_1));
     camera_info_subscription_ = create_subscription<CameraInfo>(
         get_parameter("camera_info_topic").as_string(), sensor_qos,
         std::bind(&VisionDebugViewer::on_camera_info, this,
@@ -298,33 +274,7 @@ public:
                           target_is_matched, selected_annotation != nullptr);
     }
 
-    cv::Mat output = color_view;
-    if (display_depth_ && selected_color != nullptr) {
-      const DepthFrame *depth = nearest_depth(selected_color->stamp_ns);
-      if (depth != nullptr) {
-        cv::Mat depth_view = colorize_depth(depth->metres);
-        const bool same_dimensions = depth_view.size() == color_view.size();
-        if (!same_dimensions) {
-          cv::resize(depth_view, depth_view, color_view.size(), 0.0, 0.0,
-                     cv::INTER_NEAREST);
-          put_status_line(depth_view,
-                          "DEPTH SIZE MISMATCH - resized for display", 0,
-                          cv::Scalar(0, 0, 255));
-        } else {
-          put_status_line(depth_view, "Aligned depth", 0,
-                          cv::Scalar(255, 255, 0));
-        }
-        if (same_dimensions && target_is_fresh && target_is_matched) {
-          draw_depth_target(depth_view, depth->metres, *selected_color);
-        }
-        cv::hconcat(color_view, depth_view, output);
-      } else {
-        put_status_line(output, "No aligned depth frame within configured skew",
-                        4, cv::Scalar(0, 165, 255));
-      }
-    }
-
-    cv::imshow(kWindowName, output);
+    cv::imshow(kWindowName, color_view);
     if (display_wide_) {
       cv::imshow(kWideWindowName, wide_output(now));
     }
@@ -478,36 +428,6 @@ private:
     }
   }
 
-  void on_depth(const Image::ConstSharedPtr message) {
-    double scale = 0.0;
-    if (message->encoding == sensor_msgs::image_encodings::TYPE_16UC1 ||
-        message->encoding == sensor_msgs::image_encodings::MONO16) {
-      scale = 0.001;
-    } else if (message->encoding == sensor_msgs::image_encodings::TYPE_32FC1 ||
-               message->encoding == sensor_msgs::image_encodings::TYPE_64FC1) {
-      scale = 1.0;
-    } else {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "Unsupported depth encoding: %s",
-                           message->encoding.c_str());
-      return;
-    }
-
-    try {
-      DepthFrame frame;
-      frame.stamp_ns = stamp_to_nanoseconds(message->header.stamp);
-      cv_bridge::toCvShare(message)->image.convertTo(frame.metres, CV_32FC1,
-                                                     scale);
-      depth_frames_.push_back(std::move(frame));
-      while (depth_frames_.size() > kFrameBufferLimit) {
-        depth_frames_.pop_front();
-      }
-    } catch (const std::exception &exception) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "Cannot convert depth image: %s", exception.what());
-    }
-  }
-
   void on_observation(const PointCloud::ConstSharedPtr message) {
     if (message->header.frame_id != kExpectedTargetFrame ||
         message->points.size() != 1) {
@@ -598,69 +518,19 @@ private:
                     2, cv::Scalar(0, 255, 0));
   }
 
-  void draw_depth_target(cv::Mat &depth_view, const cv::Mat &depth_metres,
-                         const ColorFrame &color_frame) const {
-    const auto pixel = projected_target(color_frame);
-    if (!pixel.has_value() || pixel->x >= depth_metres.cols ||
-        pixel->y >= depth_metres.rows) {
-      return;
-    }
-    cv::drawMarker(depth_view, *pixel, cv::Scalar(255, 255, 255),
-                   cv::MARKER_CROSS, 30, 3, cv::LINE_AA);
-    const float measured_depth = depth_metres.at<float>(pixel->y, pixel->x);
-    if (std::isfinite(measured_depth) && measured_depth > 0.0F) {
-      put_status_line(
-          depth_view,
-          cv::format("depth pixel=%.3fm  observation Z=%.3fm  delta=%.3fm",
-                     measured_depth, target_->z, measured_depth - target_->z),
-          1, cv::Scalar(255, 255, 255));
-    }
-  }
-
-  const DepthFrame *nearest_depth(std::int64_t color_stamp_ns) const {
-    const DepthFrame *best = nullptr;
-    std::int64_t best_delta = std::numeric_limits<std::int64_t>::max();
-    for (const auto &depth : depth_frames_) {
-      const std::int64_t delta = std::llabs(depth.stamp_ns - color_stamp_ns);
-      if (delta < best_delta) {
-        best = &depth;
-        best_delta = delta;
-      }
-    }
-    return best_delta <= max_color_depth_skew_ns_ ? best : nullptr;
-  }
-
-  cv::Mat colorize_depth(const cv::Mat &metres) const {
-    cv::Mat safe = metres.clone();
-    const cv::Mat valid =
-        (safe > 0.0F) & (safe <= static_cast<float>(max_depth_m_));
-    safe.setTo(0.0F, ~valid);
-    cv::Mat scaled;
-    safe.convertTo(scaled, CV_8UC1, 255.0 / max_depth_m_);
-    cv::Mat colorized;
-    cv::applyColorMap(scaled, colorized, cv::COLORMAP_TURBO);
-    colorized.setTo(cv::Scalar(0, 0, 0), ~valid);
-    return colorized;
-  }
-
   rclcpp::Subscription<Image>::SharedPtr color_subscription_;
   rclcpp::Subscription<Image>::SharedPtr annotated_subscription_;
-  rclcpp::Subscription<Image>::SharedPtr depth_subscription_;
   rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_subscription_;
   rclcpp::Subscription<PointCloud>::SharedPtr observation_subscription_;
   rclcpp::Subscription<Image>::SharedPtr wide_raw_subscription_;
   rclcpp::Subscription<Image>::SharedPtr wide_debug_subscription_;
   std::deque<ColorFrame> color_frames_;
   std::deque<AnnotatedFrame> annotated_frames_;
-  std::deque<DepthFrame> depth_frames_;
   Intrinsics latest_intrinsics_;
   std::optional<TargetObservation> target_;
   std::optional<WideFrame> wide_raw_frame_;
   std::optional<WideFrame> wide_debug_frame_;
   double target_timeout_s_{1.0};
-  double max_depth_m_{8.0};
-  std::int64_t max_color_depth_skew_ns_{40000000};
-  bool display_depth_{true};
   bool display_wide_{false};
   bool window_created_{false};
   bool window_was_visible_{false};

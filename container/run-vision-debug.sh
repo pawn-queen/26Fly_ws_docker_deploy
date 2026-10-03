@@ -297,7 +297,6 @@ else
 fi
 start_component vision-debug-viewer --ros-args \
     -p "color_topic:=${DETECT_COLOR_TOPIC:-/camera/camera/color/image_raw}" \
-    -p "depth_topic:=${DETECT_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}" \
     -p "camera_info_topic:=${DETECT_CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}" \
     -p "observation_topic:=/target_observation" \
     -p "annotated_topic:=/detect/debug/image" \
