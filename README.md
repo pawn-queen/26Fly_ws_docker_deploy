@@ -197,6 +197,31 @@ RealSense 和实机检测在不同终端人工运行：
 以上两个入口是比赛用无界面路径，语义保持固定：相机只发布 ROS topic，detect 固定使用
 `show_image=false`，不继承宿主 `DISPLAY`。比赛视觉任务仍通过这些入口启动。
 
+### 一次启动相机、检测器和双窗口
+
+在 Jetson 当前图形桌面或远程桌面的终端运行：
+
+```bash
+./run_detect.sh
+```
+
+此宿主入口并行运行 `./start_camera.sh` 和无参数的 `./scripts/run-vision-debug.sh`。
+相机启动、RGB／对齐深度／内参就绪检查、检测器启动及超时继续由 `start_camera.sh` 负责；
+窗口先显示等待，收到图像后显示画面。看到 `Camera and detector are running` 后，
+可以在另一终端按原流程启动控制任务；该提示不代表已检测到有效目标。
+广角图像仍来自控制程序，未启动控制时广角窗口保持等待。识别框沿用现有发布设置。
+
+在任一窗口按 `q`、Esc 或点击关闭，只关闭两个显示窗口，相机和检测器继续运行，
+`run_detect.sh` 留在前台。需要恢复显示时，在另一图形终端运行 `./scripts/run-vision-debug.sh`。
+在 `run_detect.sh` 的终端按 Ctrl-C 会停止本次启动的相机、检测器和仍在运行的显示会话；
+TERM／HUP 同样执行清理。后来单独重新打开的显示会话由其自己的终端管理。
+相机包装器退出或显示包装器非零退出时，此入口清理本次剩余组件并报告退出状态。
+已有相机、检测器或显示会话的冲突仍按原机制拒绝，不接管已有任务。
+控制程序、通信服务和容器由原流程独立管理。
+
+该入口仅接受无参数启动，使用与现有显示入口相同的 X11 环境；不要用 `sudo` 运行。
+在当前双窗口版本已经部署的前提下，新增宿主入口无需重建镜像或工作区。
+
 ### 已有任务的 RealSense RGB 和广角图像显示
 
 先按下方比赛流程启动 `./start_camera.sh` 和需要的控制任务，再从 Jetson 当前图形桌面或远程桌面的另一终端运行：
@@ -245,7 +270,7 @@ docker rm 26fly-runtime-pre-wide-viewer
 本次变化不改变 workspace ABI，可继续使用 `.env` 中现有的 build/install/log named volumes。
 广角图像发布来自相邻源码仓库 `26Season_Fly_ws_jetson/src/fly/control/0821auto.py`，通过 `/workspace/src` 只读挂载和 Python symlink install 加载。首次升级执行 `build-workspace.sh` 刷新 install volume，并在之后重新启动控制任务；已运行的旧控制进程不会自动加载新源码。后续普通 Python 函数修改通常只需重启相应任务，C++ viewer 或 `container/` 脚本修改仍需重建镜像和迁移容器。确认三条路径均正常前，保留改名后的旧容器以便回退；验证通过后再删除旧容器。
 
-启动控制前，应先在另一终端运行 `./start_camera.sh`：它先启动 camera，等待彩色图、对齐深度图及相机内参的样本，再启动 detect 并等待 `/target_observation` 的 publisher。当前 `pid_*.sh` 本身不重复执行这些视觉话题预检；有 publisher 也不等于已产生有效检测结果。
+启动控制前，应先在另一终端运行 `./start_camera.sh`，或需要同时显示时运行 `./run_detect.sh`，等待相机和检测器已运行的提示。`start_camera.sh` 先启动 camera，等待彩色图、对齐深度图及相机内参的样本，再启动 detect 并等待 `/target_observation` 的 publisher。当前 `pid_*.sh` 本身不重复执行这些视觉话题预检；有 publisher 也不等于已产生有效检测结果。
 
 真实控制必须由操作员在前台终端逐次确认，以下命令任选其一：
 
