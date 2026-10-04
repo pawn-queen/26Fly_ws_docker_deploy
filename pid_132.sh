@@ -15,6 +15,8 @@ control_args=(
   --drop-phase-timeout 80.0 
   --descent-height 0.7 
   --timer-period 0.05 
+  --camera-timer-period 0.03333333333333333
+  --vision-timer-period 0.03333333333333333
   --takeoff-height -1.7 
   --target-order 1 3 2 
   --search-height -4.5 

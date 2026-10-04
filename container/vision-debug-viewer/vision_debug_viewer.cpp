@@ -38,7 +38,6 @@ constexpr char kWideWindowName[] = "26Fly Wide camera / mission debug";
 constexpr char kExpectedTargetFrame[] = "target_camera_optical_frame";
 constexpr std::size_t kFrameBufferLimit = 30;
 constexpr double kAnnotatedFrameMaxAgeS = 1.0;
-constexpr double kWideFrameMaxAgeS = 1.0;
 
 std::int64_t stamp_to_nanoseconds(const builtin_interfaces::msg::Time &stamp) {
   return static_cast<std::int64_t>(stamp.sec) * 1000000000LL +
@@ -122,11 +121,6 @@ struct TargetObservation {
   SteadyClock::time_point received_at{};
 };
 
-struct WideFrame {
-  cv::Mat image;
-  SteadyClock::time_point received_at{};
-};
-
 class VisionDebugViewer final : public rclcpp::Node {
 public:
   VisionDebugViewer() : Node("vision_debug_viewer") {
@@ -175,12 +169,13 @@ public:
       wide_raw_subscription_ = create_subscription<Image>(
           get_parameter("wide_raw_topic").as_string(), wide_qos,
           [this](const Image::ConstSharedPtr message) {
-            on_wide_image(message, wide_raw_frame_, "raw");
+            on_wide_image(message, vision_debug::WideFrameSource::Raw, "raw");
           });
       wide_debug_subscription_ = create_subscription<Image>(
           get_parameter("wide_debug_topic").as_string(), wide_qos,
           [this](const Image::ConstSharedPtr message) {
-            on_wide_image(message, wide_debug_frame_, "debug");
+            on_wide_image(message, vision_debug::WideFrameSource::Debug,
+                          "debug");
           });
     }
 
@@ -276,7 +271,7 @@ public:
 
     cv::imshow(kWindowName, color_view);
     if (display_wide_) {
-      cv::imshow(kWideWindowName, wide_output(now));
+      render_wide(now);
     }
     const int key = cv::waitKey(1) & 0xff;
     if (key == 'q' || key == 27) {
@@ -317,47 +312,52 @@ private:
             window_is_open(kWideWindowName, wide_window_was_visible_));
   }
 
-  cv::Mat wide_output(SteadyClock::time_point now) const {
-    const auto choice = vision_debug::choose_wide_frame(
-        wide_raw_frame_.has_value()
-            ? std::make_optional(wide_raw_frame_->received_at)
-            : std::nullopt,
-        wide_debug_frame_.has_value()
-            ? std::make_optional(wide_debug_frame_->received_at)
-            : std::nullopt,
-        now, kWideFrameMaxAgeS);
-    if (choice.source == vision_debug::WideFrameSource::Debug) {
-      return wide_debug_frame_->image;
+  void render_wide(SteadyClock::time_point now) {
+    const auto choice = wide_frames_.select(now);
+    const auto stale_second =
+        choice.source == vision_debug::WideFrameSource::Stale
+            ? static_cast<std::int64_t>(std::floor(choice.age_s))
+            : -1;
+    if (last_wide_source_ == choice.source &&
+        last_wide_generation_ == choice.generation &&
+        last_wide_stale_second_ == stale_second) {
+      return;
     }
-    if (choice.source == vision_debug::WideFrameSource::Raw) {
-      return wide_raw_frame_->image;
-    }
-    cv::Mat output = cv::Mat::zeros(480, 640, CV_8UC3);
-    if (choice.source == vision_debug::WideFrameSource::Waiting) {
-      put_status_line(output, "Waiting for wide camera mission frames...", 0,
-                      cv::Scalar(0, 255, 255));
+
+    cv::Mat output;
+    if (choice.image) {
+      output = choice.image->image;
     } else {
-      put_status_line(output,
-                      cv::format("STALE - last wide frame %.1f s ago",
-                                 choice.age_s),
-                      0, cv::Scalar(0, 165, 255));
+      output = cv::Mat::zeros(480, 640, CV_8UC3);
+      if (choice.source == vision_debug::WideFrameSource::Waiting) {
+        put_status_line(output, "Waiting for wide camera mission frames...", 0,
+                        cv::Scalar(0, 255, 255));
+      } else {
+        put_status_line(output,
+                        cv::format("STALE - last wide frame %.0f s ago",
+                                   std::floor(choice.age_s)),
+                        0, cv::Scalar(0, 165, 255));
+      }
     }
-    return output;
+    cv::imshow(kWideWindowName, output);
+    last_wide_source_ = choice.source;
+    last_wide_generation_ = choice.generation;
+    last_wide_stale_second_ = stale_second;
   }
 
   void on_wide_image(const Image::ConstSharedPtr message,
-                     std::optional<WideFrame> &destination,
+                     vision_debug::WideFrameSource source,
                      const char *source_name) {
     try {
-      WideFrame next;
-      next.image =
-          cv_bridge::toCvCopy(message, sensor_msgs::image_encodings::BGR8)
-              ->image;
-      if (next.image.empty()) {
+      auto next =
+          cv_bridge::toCvShare(message, sensor_msgs::image_encodings::BGR8);
+      if (next->image.empty()) {
         throw std::invalid_argument("image has no pixels");
       }
-      next.received_at = SteadyClock::now();
-      destination = std::move(next);
+      wide_frames_.add({stamp_to_nanoseconds(message->header.stamp),
+                        message->header.frame_id, message->width,
+                        message->height},
+                       source, std::move(next), SteadyClock::now());
     } catch (const std::exception &exception) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "Cannot convert wide %s image: %s", source_name,
@@ -528,8 +528,10 @@ private:
   std::deque<AnnotatedFrame> annotated_frames_;
   Intrinsics latest_intrinsics_;
   std::optional<TargetObservation> target_;
-  std::optional<WideFrame> wide_raw_frame_;
-  std::optional<WideFrame> wide_debug_frame_;
+  vision_debug::BufferedWideDisplay<cv_bridge::CvImageConstPtr> wide_frames_;
+  std::optional<vision_debug::WideFrameSource> last_wide_source_;
+  std::uint64_t last_wide_generation_{0};
+  std::int64_t last_wide_stale_second_{-1};
   double target_timeout_s_{1.0};
   bool display_wide_{false};
   bool window_created_{false};
