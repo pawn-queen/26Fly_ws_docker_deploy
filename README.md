@@ -209,7 +209,7 @@ RealSense 和实机检测在不同终端人工运行：
 相机启动、RGB／对齐深度／内参就绪检查、检测器启动及超时继续由 `start_camera.sh` 负责；
 窗口先显示等待，收到图像后显示画面。看到 `Camera and detector are running` 后，
 可以在另一终端按原流程启动控制任务；该提示不代表已检测到有效目标。
-广角图像仍来自控制程序，未启动控制时广角窗口保持等待。识别框沿用现有发布设置。
+广角图像仍来自控制程序，未启动控制时广角窗口保持等待。RealSense 窗口默认显示新鲜匹配的 YOLO 框，广角标注保持现有任务逻辑。
 
 在任一窗口按 `q`、Esc 或点击关闭，只关闭两个显示窗口，相机和检测器继续运行，
 `run_detect.sh` 留在前台。需要恢复显示时，在另一图形终端运行 `./scripts/run-vision-debug.sh`。
@@ -235,9 +235,19 @@ echo "$DISPLAY"
 
 RealSense RGB 窗口订阅原始彩色图、CameraInfo、`/detect/debug/image` 和
 `/target_observation`。只有标注图与原始彩色帧的时间戳、坐标帧和尺寸一致且标注图未过期时，
-才显示检测框；否则显示原始 RGB 图像。比赛 detect 默认不发布标注图时，viewer 使用原始 RGB，不为打开显示而重启 detect。
+才显示检测框；否则显示原始 RGB 图像。detect 默认开启 `publish_debug_image=true`，仅在
+`/detect/debug/image` 有订阅者时绘制并发布完整标注图，包含矩形框、类别名和置信度；
+选中目标为绿色并带 `SELECTED`，其他目标为橙色。YOLO 无检测结果时发布无框图，以清除上一帧的框。
+无订阅者时跳过标注图复制、绘制、打包和发布，YOLO 与三维目标输出继续运行。
+`show_image=false` 保持不变，纯 SSH 无订阅时不会打开窗口，也不执行标注图处理。
+此默认值对所有使用默认参数的检测入口生效；节点启动时显式设置
+`publish_debug_image=false` 可禁用标注发布。关闭并重新打开 viewer 后，按需发布自动停止和恢复。
 `/target_observation` 仍只提供被选中目标的三维中心点和置信度；viewer 在匹配帧上投影
 绿色中心标记，并显示 XYZ。viewer 不订阅或预览深度图；RealSense 仍发布对齐深度，detect 仍用它计算目标三维坐标，比赛启动流程的深度就绪检查也保留。
+
+本次标注默认值与按需发布逻辑只修改检测器 Python 源码。在容器已有当前 viewer，且工作区
+按上述源码挂载和 `--symlink-install` 部署的前提下，更新源码后重启 detect 即可生效，
+无需重建镜像、迁移容器或重新构建工作区；已运行的检测器不会自动加载新源码。
 
 广角窗口订阅 control 发布的 `/control/widecam/image_raw`（最高 10 Hz）和 `/control/widecam/debug_image`。debug 是完整图像，保持现有 `GLOBAL_SEARCH`、`RECON_SEARCH` 阶段的识别框；其他状态发布原图，不扩大识别阶段。viewer 优先显示新鲜 debug，debug 缺失或过期时使用新鲜 raw，不要求两路图像时间戳相同。未收到有效图像时显示等待；超过 1 秒没有新鲜图像时显示 `STALE`，避免将冻结的画面误认为实时图像。任务关闭相机或停止图像发布后，窗口会进入等待或失效状态。
 
