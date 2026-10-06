@@ -306,6 +306,15 @@ docker rm 26fly-runtime-pre-wide-viewer
 本次变化不改变 workspace ABI，可继续使用 `.env` 中现有的 build/install/log named volumes。
 广角图像发布来自相邻源码仓库 `26Season_Fly_ws_jetson/src/fly/control/0821auto.py`，通过 `/workspace/src` 只读挂载和 Python symlink install 加载。首次升级执行 `build-workspace.sh` 刷新 install volume，并在之后重新启动控制任务；已运行的旧控制进程不会自动加载新源码。后续普通 Python 函数修改通常只需重启相应任务，C++ viewer 或 `container/` 脚本修改仍需重建镜像和迁移容器。确认三条路径均正常前，保留改名后的旧容器以便回退；验证通过后再删除旧容器。
 
+系统时间回到 1970 年且 NTP 同步失败时，先在 **Jetson 宿主机**上手动校时，再启动相机、检测，最后运行 `pid_132.sh`。已运行的相机、检测和控制任务应先停止，避免运行中发生时间跳变。本次十月交付的校时脚本固定使用 **2026 年 10 月、北京时间（+08:00）**，输入日和小时，分钟、秒均为 `00`，支持 `06 09` 等前导零输入：
+
+```bash
+# 示例：设置为北京时间 2026-10-06 15:00:00；请按现场时间修改 6 和 15
+sudo ./scripts/set-host-time.sh 6 15
+```
+
+脚本校验参数后关闭 NTP 并修改宿主系统时间，打印修改前后时间，不改变系统时区；容器同时看到新的系统时间。仅新增宿主脚本，无需重建镜像或 ROS 工作空间。任一步失败即退出；如果关闭 NTP 后设置时间失败，NTP 仍保持关闭。需要恢复网络校时时，在任务停止后执行 `sudo timedatectl set-ntp true`。这是粗略校时，现有日志仍按日期过滤，同一小时内较晚的历史日志仍可能被回放。
+
 启动控制前，应先在另一终端运行 `./start_camera.sh`，或需要同时显示时运行 `./run_detect.sh`，等待相机和检测器已运行的提示。`start_camera.sh` 先启动 camera，等待彩色图、对齐深度图及相机内参的样本，再启动 detect 并等待 `/target_observation` 的 publisher。当前 `pid_*.sh` 本身不重复执行这些视觉话题预检；有 publisher 也不等于已产生有效检测结果。
 
 真实控制必须由操作员在前台终端逐次确认，以下命令任选其一：
