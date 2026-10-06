@@ -252,6 +252,8 @@ RealSense RGB 窗口订阅原始彩色图、CameraInfo、`/detect/debug/image` �
 广角窗口订阅 control 发布的 `/control/widecam/image_raw` 和 `/control/widecam/debug_image`，
 图像发布目标为 30 Hz，仅在有订阅者时打包并发布新帧。debug 是完整图像，保持现有
 `GLOBAL_SEARCH`、`RECON_SEARCH` 阶段的识别框；其他状态发布原图，不扩大识别阶段。
+控制程序加载模型并完成首次 `track()` 预热前暂停广角图像发布，窗口显示等待；模型就绪后，
+下一个发布周期恢复 30 Hz 调度。
 viewer 按源时间戳、frame_id 和尺寸关联两路图像，最多缓存 8 组源帧，从每组首次接收
 开始缓冲约 100 毫秒。每轮显示已到期的最新源帧，有对应 debug 时显示完整标注图，
 否则显示 raw；不把旧框叠加到新原图，也不等待积压的旧推理结果。debug 单独到达时也能显示。
