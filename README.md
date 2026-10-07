@@ -137,7 +137,7 @@ docker rm 26fly-runtime-pre-jetson-workspace
 ./scripts/logs.sh -u mavlink-routerd.service -n 200
 ./scripts/logs.sh -u micro-xrce-agent.service --since today -f
 ./scripts/logs.sh -u 26fly-camera.service -n 100
-./scripts/logs.sh -u 26fly-control.service -n 100
+./scripts/logs.sh -u 26fly-control.service -n 100 # 仅查看 systemd 管理事件
 ```
 
 也可以进入容器后直接操作：
@@ -148,9 +148,18 @@ systemctl status micro-xrce-agent.service
 systemctl status mavlink-routerd.service
 ```
 
-这些 `systemctl` 和 `journalctl` 命令连接的是容器内 systemd 与 journald，而不是宿主服务。最小 target 启动 journald 和 journal flush；MAVLink、Agent、Depth cam、Control 的 stdout/stderr 按 unit 存入 `/var/log/journal`。`scripts/logs.sh` 将参数原样交给容器内 `journalctl`，可使用 `-u`、`--since`、`-n`、`-f` 筛选。journal 设置 `SystemMaxUse=256M` 和 `SystemMaxFileSize=16M`；journald 仅清理已归档文件，活跃文件可能使实际占用短暂超过 256 MiB。journal 存在容器可写层：停止、启动同一容器后仍可查询，删除并重建容器后消失。Detect 仍写到 `docker logs`，可用 `docker logs 26fly-runtime` 查看。ROS 自己写入 `/workspace/log/ros` 的文件，以及控制任务的 CSV、照片、视频仍在各自原有路径。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
+这些 `systemctl` 和 `journalctl` 命令连接的是容器内 systemd 与 journald，而不是宿主服务。最小 target 启动 journald 和 journal flush；MAVLink、Agent、Depth cam 的 stdout/stderr 按 unit 存入 `/var/log/journal`。`scripts/logs.sh` 将参数原样交给容器内 `journalctl`，可使用 `-u`、`--since`、`-n`、`-f` 筛选。journal 设置 `SystemMaxUse=256M` 和 `SystemMaxFileSize=16M`；journald 仅清理已归档文件，活跃文件可能使实际占用短暂超过 256 MiB。journal 存在容器可写层：停止、启动同一容器后仍可查询，删除并重建容器后消失。Detect 仍写到 `docker logs`，可用 `docker logs 26fly-runtime` 查看。ROS 自己写入 `/workspace/log/ros` 的文件，以及控制任务的 CSV、照片、视频仍在各自原有路径。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
 
-切换已有容器需要短暂停机并重建镜像和容器；容器可写层无法通过 `docker restart` 换成新镜像。先停止人工任务，再执行以下保留式迁移，沿用现有 build/install/log 卷。旧容器只在验证期间用于回退；新容器测试通过后必须删除：
+Control 仍由 systemd 管理，但程序 stdout/stderr 直接合并写入 `/workspace/log/control/logs/control_<北京时间YYYYMMDD_HHMMSS_纳秒>_<owner-id>.log`，每次授权启动使用一个独立文件。启动时打印完整路径，终端从文件起始位置实时跟随；无法创建文件时不启动 control。日志保存在现有 `${VOLUME_PREFIX}-log` 卷中，沿用该卷重建容器也会保留。新文件不受 journald 配额管理，需自行管理历史文件；正文保留程序原始输出，不附加 `short-iso-precise` 的行前缀。`scripts/logs.sh -u 26fly-control.service` 仍能查看 Started/Stopped/Failed 等 systemd 管理事件，但不再用于查询程序打印日志。
+
+```bash
+docker exec 26fly-runtime ls -lt /workspace/log/control/logs
+# 将下方路径替换为本次启动时打印的完整日志路径
+CONTROL_LOG_FILE='/workspace/log/control/logs/实际日志文件名.log'
+docker exec -it 26fly-runtime tail -n 100 -F -- "${CONTROL_LOG_FILE}"
+```
+
+Control 文件日志改动只涉及宿主包装器，下一次启动 control 即生效，无需重建镜像、重建或重启 runtime，也无需执行 `build-workspace.sh`。若升级的是镜像内 journald 配置等内容，切换已有容器仍需短暂停机并重建镜像和容器；容器可写层无法通过 `docker restart` 换成新镜像。先停止人工任务，再执行以下保留式迁移，沿用现有 build/install/log 卷。旧容器只在验证期间用于回退；新容器测试通过后必须删除：
 
 ```bash
 ./scripts/build-image.sh
@@ -165,7 +174,7 @@ docker rename 26fly-runtime 26fly-runtime-pre-journald
 docker rm 26fly-runtime-pre-journald
 ```
 
-上述命令只验证基础通信服务；相机和 Control 的日志需在人工启动对应任务后分别用 `-u 26fly-camera.service`、`-u 26fly-control.service` 查询。Control 仍需逐次授权。执行最后一条 `docker rm` 前，必须先完成本次升级涉及的全部测试并确认通过；删除后旧容器的 `docker logs` 历史不再保留，新容器的 journal 从创建时开始记录。
+上述命令只验证基础通信服务；相机日志需在人工启动后用 `-u 26fly-camera.service` 查询，Control 程序日志使用上面的文件查询方式。Control 仍需逐次授权。执行最后一条 `docker rm` 前，必须先完成本次升级涉及的全部测试并确认通过；删除后旧容器的 `docker logs` 历史不再保留，新容器的 journal 从创建时开始记录。
 
 Micro XRCE-DDS Agent v2.4.2 在同一个镜像中以 `UAGENT_USE_SYSTEM_FASTDDS=ON` 构建，直接链接 ROS Humble 的 Fast DDS 2.6/Fast CDR，避免 Agent 引入另一套 DDS 动态库。mavlink-router 固定为 v4。
 
@@ -329,7 +338,7 @@ sudo ./scripts/set-host-time.sh 6 15
 仅输入 `y` 或 `Y` 才继续；其他输入、输入结束、非前台交互终端及提示期间 Ctrl-C 都不会启动控制。
 即使预先设置 `ALLOW_FLIGHT_CONTROL=YES`，也不能跳过询问。
 
-确认后，宿主脚本留在前台跟踪 `26fly-control.service`，Ctrl-C 仍通过 systemd 停止本次 control；
+确认后，宿主脚本留在前台跟踪本次 control 日志文件及 `26fly-control.service` 状态，Ctrl-C 仍通过 systemd 停止本次 control；
 通信服务和容器继续运行。宿主使用 `systemd-run --setenv` 仅为本次 transient unit 设置内部许可，
 容器入口再次核对；`config/runtime.env` 永久保持 `ALLOW_FLIGHT_CONTROL=NO`。此确认用于防止误启动，
 不代替 PX4 飞行前检查。

@@ -51,7 +51,7 @@ _managed_task_start_logs() {
     local started_at
 
     case "${_MANAGED_TASK_LABEL}" in
-        camera|control)
+        camera)
             # Capture the boundary before the unit starts, so a quick startup
             # cannot outrun the asynchronous journalctl follower.
             started_at="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -61,6 +61,12 @@ _managed_task_start_logs() {
                 journalctl --no-pager --follow --lines=all --output=cat \
                 --since="${started_at}" \
                 --unit="${_MANAGED_TASK_UNIT}" &
+            ;;
+        control)
+            # Include startup output already in the file, and keep the same
+            # PTY-based cleanup as the camera journal follower.
+            docker exec --tty "${_MANAGED_TASK_CONTAINER}" \
+                tail -n +1 --sleep-interval=0.1 -F -- "${_MANAGED_TASK_LOG_FILE}" &
             ;;
         detect)
             docker logs --follow --tail 0 "${_MANAGED_TASK_CONTAINER}" &
@@ -544,6 +550,7 @@ run_managed_control_unit() {
     _MANAGED_TASK_REGISTRATION_UNKNOWN=false
     _MANAGED_TASK_CONTROL_GROUP=
     _MANAGED_TASK_LOG_PID=
+    _MANAGED_TASK_LOG_FILE=
     _MANAGED_TASK_WAIT_PID=
     _MANAGED_TASK_SIGNAL_STATUS=0
 
@@ -552,8 +559,6 @@ run_managed_control_unit() {
     _MANAGED_TASK_OWNER_TOKEN=${owner_description}
 
     _managed_task_wait_for_systemd
-    _managed_task_require_journald
-
     active_state="$(_managed_task_systemctl show --property=ActiveState --value "${unit_name}" 2>/dev/null || true)"
     case "${active_state}" in
         active|activating|reloading|deactivating)
@@ -572,6 +577,26 @@ run_managed_control_unit() {
     trap '_managed_task_handle_signal 143 SIGTERM' TERM
     trap '_managed_task_handle_signal 129 SIGHUP' HUP
 
+    _MANAGED_TASK_LOG_FILE="/workspace/log/control/logs/control_$(TZ=Asia/Shanghai date '+%Y%m%d_%H%M%S_%N')_${owner_id}.log"
+    # Prepare a unique file before either the follower or the service starts.
+    # Refuse an unwritable path or a collision rather than truncate old logs.
+    if ! docker exec "${_MANAGED_TASK_CONTAINER}" sh -c '
+        set -eu
+        umask 0002
+        mkdir -p -- /workspace/log/control/logs
+        set -C
+        : > "$1"
+    ' sh "${_MANAGED_TASK_LOG_FILE}"; then
+        echo "ERROR: cannot create control log file: ${_MANAGED_TASK_LOG_FILE}" >&2
+        if (( _MANAGED_TASK_SIGNAL_STATUS != 0 )); then
+            return "${_MANAGED_TASK_SIGNAL_STATUS}"
+        fi
+        return 2
+    fi
+    if (( _MANAGED_TASK_SIGNAL_STATUS != 0 )); then
+        return "${_MANAGED_TASK_SIGNAL_STATUS}"
+    fi
+    echo "Control log file (Asia/Shanghai start time): ${_MANAGED_TASK_LOG_FILE}" >&2
     _managed_task_start_logs
 
     echo "Starting control as transient ${unit_name}; press Ctrl-C to stop it completely." >&2
@@ -593,6 +618,7 @@ run_managed_control_unit() {
             --service-type=exec \
             --working-directory=/workspace \
             --setenv=ALLOW_FLIGHT_CONTROL=YES \
+            --setenv=PYTHONUNBUFFERED=1 \
             --property=DefaultDependencies=no \
             --property=Conflicts=shutdown.target \
             --property=Before=shutdown.target \
@@ -602,8 +628,8 @@ run_managed_control_unit() {
             --property=KillSignal=SIGINT \
             --property=SendSIGKILL=yes \
             --property=TimeoutStopSec=15s \
-            --property=StandardOutput=journal \
-            --property=StandardError=journal \
+            --property="StandardOutput=append:${_MANAGED_TASK_LOG_FILE}" \
+            --property=StandardError=inherit \
             -- /usr/local/bin/run-control "$@"
     ) &
     _MANAGED_TASK_WAIT_PID=$!
