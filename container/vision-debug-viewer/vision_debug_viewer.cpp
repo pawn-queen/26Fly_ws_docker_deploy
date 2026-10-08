@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include <builtin_interfaces/msg/time.hpp>
@@ -100,6 +101,9 @@ struct Intrinsics {
 
 struct ColorFrame {
   std::int64_t stamp_ns{0};
+  std::uint64_t generation{0};
+  // Keep the ROS message (or encoding-converted image) alive with its pixels.
+  cv_bridge::CvImageConstPtr owner;
   cv::Mat image;
   std::string frame_id;
   Intrinsics intrinsics;
@@ -107,6 +111,8 @@ struct ColorFrame {
 
 struct AnnotatedFrame {
   std::int64_t stamp_ns{0};
+  std::uint64_t generation{0};
+  cv_bridge::CvImageConstPtr owner;
   cv::Mat image;
   std::string frame_id;
   SteadyClock::time_point received_at{};
@@ -120,6 +126,90 @@ struct TargetObservation {
   double confidence{0.0};
   SteadyClock::time_point received_at{};
 };
+
+struct RealSenseSelection {
+  const ColorFrame *color{nullptr};
+  const AnnotatedFrame *annotation{nullptr};
+  bool target_is_fresh{false};
+  bool target_is_matched{false};
+};
+
+RealSenseSelection select_realsense_frame(
+    const std::deque<ColorFrame> &colors,
+    const std::deque<AnnotatedFrame> &annotations,
+    const std::optional<TargetObservation> &target,
+    SteadyClock::time_point now, double target_timeout_s) {
+  const ColorFrame *selected_color =
+      colors.empty() ? nullptr : &colors.back();
+  const AnnotatedFrame *selected_annotation = nullptr;
+  bool target_is_fresh = false;
+  bool target_is_matched = false;
+
+  // Prefer the latest fresh detector frame that matches a raw RGB frame.
+  for (auto annotated = annotations.rbegin();
+       annotated != annotations.rend(); ++annotated) {
+    const double age_s =
+        std::chrono::duration<double>(now - annotated->received_at).count();
+    if (age_s > kAnnotatedFrameMaxAgeS) {
+      continue;
+    }
+    const auto match = std::find_if(
+        colors.rbegin(), colors.rend(),
+        [&annotated](const ColorFrame &frame) {
+          return frame.stamp_ns == annotated->stamp_ns &&
+                 frame.frame_id == annotated->frame_id &&
+                 frame.image.size() == annotated->image.size();
+        });
+    if (match != colors.rend()) {
+      selected_color = &(*match);
+      selected_annotation = &(*annotated);
+      break;
+    }
+  }
+
+  if (target.has_value()) {
+    const double age_s =
+        std::chrono::duration<double>(now - target->received_at).count();
+    target_is_fresh = age_s <= target_timeout_s;
+    if (target_is_fresh && selected_annotation == nullptr) {
+      const auto match =
+          std::find_if(colors.rbegin(), colors.rend(),
+                       [&target](const ColorFrame &frame) {
+                         return frame.stamp_ns == target->stamp_ns;
+                       });
+      if (match != colors.rend()) {
+        selected_color = &(*match);
+      }
+    }
+    target_is_matched =
+        target_is_fresh && selected_color != nullptr &&
+        selected_color->stamp_ns == target->stamp_ns;
+  }
+
+  return {selected_color, selected_annotation, target_is_fresh,
+          target_is_matched};
+}
+
+// Generation IDs distinguish a replacement annotation with the same source
+// header (including clearing boxes). Ignore unmatched target changes because
+// they do not change the visible status or pixels.
+using RealSenseRenderKey =
+    std::tuple<std::uint64_t, std::uint64_t, bool, bool, double, double, double,
+               double>;
+
+RealSenseRenderKey realsense_render_key(
+    const RealSenseSelection &selection,
+    const std::optional<TargetObservation> &target) {
+  const bool show_target = selection.target_is_matched && target.has_value();
+  return {selection.color != nullptr ? selection.color->generation : 0,
+          selection.annotation != nullptr ? selection.annotation->generation : 0,
+          selection.color != nullptr && selection.target_is_fresh,
+          selection.target_is_matched,
+          show_target ? target->x : 0.0,
+          show_target ? target->y : 0.0,
+          show_target ? target->z : 0.0,
+          show_target ? target->confidence : 0.0};
+}
 
 class VisionDebugViewer final : public rclcpp::Node {
 public:
@@ -208,68 +298,29 @@ public:
     if (!windows_are_open()) {
       return false;
     }
-    cv::Mat color_view;
-    const ColorFrame *selected_color =
-        color_frames_.empty() ? nullptr : &color_frames_.back();
-    const AnnotatedFrame *selected_annotation = nullptr;
-    bool target_is_fresh = false;
-    bool target_is_matched = false;
     const auto now = SteadyClock::now();
-
-    // Prefer the latest fresh detector frame that matches a raw RGB frame.
-    for (auto annotated = annotated_frames_.rbegin();
-         annotated != annotated_frames_.rend(); ++annotated) {
-      const double age_s =
-          std::chrono::duration<double>(now - annotated->received_at).count();
-      if (age_s > kAnnotatedFrameMaxAgeS) {
-        continue;
+    const auto selection = select_realsense_frame(
+        color_frames_, annotated_frames_, target_, now, target_timeout_s_);
+    const auto render_key = realsense_render_key(selection, target_);
+    if (!last_realsense_render_key_.has_value() ||
+        *last_realsense_render_key_ != render_key) {
+      cv::Mat color_view;
+      if (selection.color == nullptr) {
+        color_view = cv::Mat::zeros(480, 640, CV_8UC3);
+        put_status_line(color_view, "Waiting for RealSense color frames...", 0,
+                        cv::Scalar(0, 255, 255));
+      } else {
+        color_view = selection.annotation != nullptr
+                         ? selection.annotation->image.clone()
+                         : selection.color->image.clone();
+        draw_target_overlay(color_view, *selection.color,
+                            selection.target_is_fresh,
+                            selection.target_is_matched,
+                            selection.annotation != nullptr);
       }
-      const auto match = std::find_if(
-          color_frames_.rbegin(), color_frames_.rend(),
-          [&annotated](const ColorFrame &frame) {
-            return frame.stamp_ns == annotated->stamp_ns &&
-                   frame.frame_id == annotated->frame_id &&
-                   frame.image.size() == annotated->image.size();
-          });
-      if (match != color_frames_.rend()) {
-        selected_color = &(*match);
-        selected_annotation = &(*annotated);
-        break;
-      }
+      cv::imshow(kWindowName, color_view);
+      last_realsense_render_key_ = render_key;
     }
-
-    if (target_.has_value()) {
-      const double age_s =
-          std::chrono::duration<double>(now - target_->received_at).count();
-      target_is_fresh = age_s <= target_timeout_s_;
-      if (target_is_fresh && selected_annotation == nullptr) {
-        const auto match =
-            std::find_if(color_frames_.rbegin(), color_frames_.rend(),
-                         [this](const ColorFrame &frame) {
-                           return frame.stamp_ns == target_->stamp_ns;
-                         });
-        if (match != color_frames_.rend()) {
-          selected_color = &(*match);
-        }
-      }
-      target_is_matched =
-          target_is_fresh && selected_color != nullptr &&
-          selected_color->stamp_ns == target_->stamp_ns;
-    }
-
-    if (selected_color == nullptr) {
-      color_view = cv::Mat::zeros(480, 640, CV_8UC3);
-      put_status_line(color_view, "Waiting for RealSense color frames...", 0,
-                      cv::Scalar(0, 255, 255));
-    } else {
-      color_view = selected_annotation != nullptr
-                       ? selected_annotation->image.clone()
-                       : selected_color->image.clone();
-      draw_target_overlay(color_view, *selected_color, target_is_fresh,
-                          target_is_matched, selected_annotation != nullptr);
-    }
-
-    cv::imshow(kWindowName, color_view);
     if (display_wide_) {
       render_wide(now);
     }
@@ -391,9 +442,10 @@ private:
       ColorFrame frame;
       frame.stamp_ns = stamp_to_nanoseconds(message->header.stamp);
       frame.frame_id = message->header.frame_id;
-      frame.image =
-          cv_bridge::toCvCopy(message, sensor_msgs::image_encodings::BGR8)
-              ->image;
+      frame.owner =
+          cv_bridge::toCvShare(message, sensor_msgs::image_encodings::BGR8);
+      frame.image = frame.owner->image;
+      frame.generation = ++color_generation_;
       frame.intrinsics = latest_intrinsics_;
       if (frame.intrinsics.frame_id != message->header.frame_id) {
         frame.intrinsics.valid = false;
@@ -413,9 +465,10 @@ private:
       AnnotatedFrame frame;
       frame.stamp_ns = stamp_to_nanoseconds(message->header.stamp);
       frame.frame_id = message->header.frame_id;
-      frame.image =
-          cv_bridge::toCvCopy(message, sensor_msgs::image_encodings::BGR8)
-              ->image;
+      frame.owner =
+          cv_bridge::toCvShare(message, sensor_msgs::image_encodings::BGR8);
+      frame.image = frame.owner->image;
+      frame.generation = ++annotated_generation_;
       frame.received_at = SteadyClock::now();
       annotated_frames_.push_back(std::move(frame));
       while (annotated_frames_.size() > kFrameBufferLimit) {
@@ -526,6 +579,9 @@ private:
   rclcpp::Subscription<Image>::SharedPtr wide_debug_subscription_;
   std::deque<ColorFrame> color_frames_;
   std::deque<AnnotatedFrame> annotated_frames_;
+  std::uint64_t color_generation_{0};
+  std::uint64_t annotated_generation_{0};
+  std::optional<RealSenseRenderKey> last_realsense_render_key_;
   Intrinsics latest_intrinsics_;
   std::optional<TargetObservation> target_;
   vision_debug::BufferedWideDisplay<cv_bridge::CvImageConstPtr> wide_frames_;

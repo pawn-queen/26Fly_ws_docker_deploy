@@ -104,6 +104,17 @@ RUN python3 -m pip install --no-cache-dir --no-deps -r /tmp/26fly-requirements.t
     && python3 -c "import cv2, numpy, scipy, torch, torchvision, ultralytics; from cv_bridge import CvBridge; a=numpy.zeros((2,2,3), dtype=numpy.uint8); b=CvBridge(); assert numpy.array_equal(a, b.imgmsg_to_cv2(b.cv2_to_imgmsg(a, encoding='bgr8'), desired_encoding='bgr8')); assert numpy.__version__ == '1.26.4'; assert cv2.__version__ == '4.11.0'" \
     && rm -f /tmp/26fly-requirements.txt
 
+# The capability probe links the same ROS SDK used by realsense2_camera; no
+# separate Python SDK, sensor streaming or configuration is needed for probing.
+COPY container/realsense-profile-probe /tmp/26fly-realsense-profile-probe
+RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
+    && cmake -S /tmp/26fly-realsense-profile-probe -B /tmp/26fly-realsense-profile-probe/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /tmp/26fly-realsense-profile-probe/build --parallel "${BUILD_JOBS}" \
+    && cmake --install /tmp/26fly-realsense-profile-probe/build \
+    && rm -rf /tmp/26fly-realsense-profile-probe
+
 # The detector keeps using the pinned headless Python OpenCV wheel.  This
 # separate C++ viewer links Ubuntu's GUI-enabled OpenCV, so an X11 failure can
 # terminate the debug window without affecting inference or target publishing.

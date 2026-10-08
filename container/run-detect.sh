@@ -27,6 +27,27 @@ if ! ros2 pkg prefix detect >/dev/null 2>&1; then
 fi
 
 mkdir -p /workspace/log/detect/videos
+# ROS double parameters require floating YAML even when the env value is an
+# integer such as 60.  Normalize without interpreting any value as shell code.
+rate_text="$(python3 - \
+    "${DETECT_MAX_PROCESSING_HZ:-60}" \
+    "${DETECT_DEBUG_IMAGE_HZ:-30}" \
+    "${DETECT_RECORD_FPS:-15}" <<'PY'
+import math
+import sys
+
+names = ('DETECT_MAX_PROCESSING_HZ', 'DETECT_DEBUG_IMAGE_HZ', 'DETECT_RECORD_FPS')
+for name, raw in zip(names, sys.argv[1:]):
+    try:
+        value = float(raw)
+    except ValueError:
+        sys.exit('ERROR: %s must be positive and finite' % name)
+    if not math.isfinite(value) or value <= 0:
+        sys.exit('ERROR: %s must be positive and finite' % name)
+    print(repr(value))
+PY
+)"
+mapfile -t detect_rates <<<"${rate_text}"
 exec ros2 run detect detect --ros-args \
     -p "weights_path:=${model}" \
     -p "conf_threshold:=${DETECT_CONFIDENCE:-0.4}" \
@@ -37,4 +58,7 @@ exec ros2 run detect detect --ros-args \
     -p "record_rgb_video:=${DETECT_RECORD_VIDEO:-false}" \
     -p "video_output_path:=/workspace/log/detect/videos" \
     -p "publish_legacy_target_position:=${DETECT_PUBLISH_LEGACY_TARGET:-false}" \
+    -p "max_processing_hz:=${detect_rates[0]}" \
+    -p "debug_image_hz:=${detect_rates[1]}" \
+    -p "recording_fps:=${detect_rates[2]}" \
     "$@"
