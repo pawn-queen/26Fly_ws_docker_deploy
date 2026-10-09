@@ -148,7 +148,7 @@ systemctl status micro-xrce-agent.service
 systemctl status mavlink-routerd.service
 ```
 
-这些 `systemctl` 和 `journalctl` 命令连接的是容器内 systemd 与 journald，而不是宿主服务。最小 target 启动 journald 和 journal flush；MAVLink、Agent、Depth cam 的 stdout/stderr 按 unit 存入 `/var/log/journal`。`scripts/logs.sh` 将参数原样交给容器内 `journalctl`，可使用 `-u`、`--since`、`-n`、`-f` 筛选。journal 设置 `SystemMaxUse=256M` 和 `SystemMaxFileSize=16M`；journald 仅清理已归档文件，活跃文件可能使实际占用短暂超过 256 MiB。journal 存在容器可写层：停止、启动同一容器后仍可查询，删除并重建容器后消失。Detect 仍写到 `docker logs`，可用 `docker logs 26fly-runtime` 查看。ROS 自己写入 `/workspace/log/ros` 的文件，以及控制任务的 CSV、照片、视频仍在各自原有路径。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
+这些 `systemctl` 和 `journalctl` 命令连接的是容器内 systemd 与 journald，而不是宿主服务。最小 target 启动 journald 和 journal flush；MAVLink、Agent、Depth cam 的 stdout/stderr 按 unit 存入 `/var/log/journal`。`scripts/logs.sh` 将参数原样交给容器内 `journalctl`，可使用 `-u`、`--since`、`-n`、`-f` 筛选。journal 设置 `SystemMaxUse=256M` 和 `SystemMaxFileSize=16M`；journald 仅清理已归档文件，活跃文件可能使实际占用短暂超过 256 MiB。journal 存在容器可写层：停止、启动同一容器后仍可查询，删除并重建容器后消失。Detect 仍写到 `docker logs`，可用 `docker logs 26fly-runtime` 查看。ROS 自己写入 `/workspace/log/ros` 的文件，以及控制任务的照片、视频仍在各自原有路径。控制程序不再创建或写入桶目标 CSV，既有 CSV 文件及其所在日志卷继续保留。设备暂时不存在时，启动包装器等待 15 秒后失败；容器 systemd 根据 `Restart=always` 继续重试，并在下一次启动时重新检查实时 `/dev`。
 
 Control 仍由 systemd 管理，但程序 stdout/stderr 直接合并写入 `/workspace/log/control/logs/control_<北京时间YYYYMMDD_HHMMSS_纳秒>_<owner-id>.log`，每次授权启动使用一个独立文件。启动时打印完整路径，终端从文件起始位置实时跟随；无法创建文件时不启动 control。日志保存在现有 `${VOLUME_PREFIX}-log` 卷中，沿用该卷重建容器也会保留。新文件不受 journald 配额管理，需自行管理历史文件；正文保留程序原始输出，不附加 `short-iso-precise` 的行前缀。`scripts/logs.sh -u 26fly-control.service` 仍能查看 Started/Stopped/Failed 等 systemd 管理事件，但不再用于查询程序打印日志。
 
@@ -299,7 +299,7 @@ GUI 事件循环保持 30 Hz，但只有图像或提示改变时重绘广角窗�
 
 `pid_132.sh` 显式设置 `--camera-timer-period 0.03333333333333333` 和
 `--vision-timer-period 0.03333333333333333`，广角采集及搜索推理目标均为 30 Hz；
-`--timer-period 0.05` 继续决定控制、PID 时间步长和 Offboard 心跳，执行器保持五线程。
+`--timer-period 0.05` 继续决定控制、PID 时间步长和 Offboard 心跳，执行器保持五个回调工作线程。
 新采集参数未设置时仍沿用控制周期，其他入口的视觉处理默认周期仍为 0.1 秒。
 视觉定时器在 `GLOBAL_SEARCH`／`RECON_SEARCH` 保持配置频率；模型就绪后的非搜索阶段使用
 `max(0.1, vision_processing_period)`。无头非搜索回调仍维护重置请求，但不读取、复制或叠字图像；
@@ -314,11 +314,33 @@ GUI 事件循环保持 30 Hz，但只有图像或提示改变时重绘广角窗�
 录像开关与内容保持原样，推理提速也可能提高录像编码和写入负载。`pid_132.sh` 沿用现有
 `.gitignore` 规则，此次不改变 Git 索引；已追踪的版本仍会包含改动，未追踪的部署副本需单独同步。
 
+控制使用 `priority_executor.py` 的单个调度器和两个工作线程池，所有回调组保持互斥：
+
+| 工作池 | 回调组 |
+|---|---|
+| 关键池：3 个线程 | 控制；目标接收／飞控状态；Offboard 心跳；位置／姿态接收；ServoControl 状态接收 |
+| 辅助池：2 个线程 | 广角采集；广角视觉处理；广角预览，以及未分类的默认服务和参数回调 |
+
+每个池按回调组轮转，同一实体最多保留一个未完成调度任务。辅助工作线程的 Linux nice
+设置为启动基准值加 5、上限 19；设置失败会记录日志，线程池隔离仍生效。调度器和关键线程
+保持原 nice。辅助任务不会占用关键池线程，但三个关键线程仍由多个关键组共享；这不是硬实时
+调度，也不能消除 Python GIL、GPU 或共享锁争用。总数五个指回调工作线程，不包含调度线程。
+
+位姿接收独立维护位置、姿态、采样／接收时间和 NED 代次快照及历史；目标接收仍逐帧执行
+原有匹配、NED 转换和锚点融合，不受 20 Hz 控制周期限制。控制每周期固定完整快照，锁外
+计算指令；换目标及 NED 重置期间复核代次，发布前再次检查，拒绝过时坐标指令。跳变和时间
+不连续事件按累计序号确认，避免并发接收时丢失新事件。退出先停止调度并等待运行中的回调，
+再销毁节点。桶目标 CSV 的创建、逐观测写入和关闭路径已删除，普通日志、录像和照片仍保留。
+此次保持原位姿历史时间记录、匹配容差和对准计时语义；时钟域及图像／位姿采样时间匹配问题
+需要另外验证，不能由线程池隔离认定已解决。
+
 控制定时器优化可以先单独同步 Python 源码并重启控制任务，无需重建镜像或工作区。完整方案
 包含镜像内相机／检测入口、能力查询工具和 C++ viewer，需要按上方保留式流程重建镜像、
 迁移容器并重启相机、检测器和控制；仅更新 Python 源码或 `docker restart` 不会升级镜像组件。
-此次没有新增 ROS 包模块或消息接口，既有 `--symlink-install` 的 Python 包无需重新构建；
-全新容器仍按原流程初始化工作区。完成首次部署后，仅修改帧率配置再重启相机／检测器即可，
+上述帧率优化没有新增 ROS 包模块或消息接口；本次线程分池新增了控制包内部模块，需要同步
+源码后执行 `./scripts/build-workspace.sh --packages-select control`，沿用 `--symlink-install`
+并重启控制任务，无需重建镜像、迁移容器或修改 RealSense 检测器与 viewer。全新容器仍按原
+流程初始化工作区。完成首次帧率方案部署后，仅修改帧率配置再重启相机／检测器即可，
 无需再次重建镜像。
 沿用现有源码挂载和 build/install/log 卷。实机验收应分别统计采集、推理、发布及窗口显示的新
 源帧频率，并比较开启显示前后的 CPU、内存、录像负载与控制心跳，不能用 GUI 重绘次数代替帧率。
@@ -326,6 +348,8 @@ GUI 事件循环保持 30 Hz，但只有图像或提示改变时重绘广角窗�
 验收目标为配置值的 90% 以上，图像到目标发布 P95 延迟不超过 100 毫秒；控制／心跳 P99 间隔
 较基线增加不超过 10 毫秒，无新增超过 0.20 秒的间隔、通信异常或持续积压。不满足时在起飞前
 使用 30 Hz 保守模式重新验证，不在飞行中重启相机。
+线程分池还需比较控制执行耗时、目标接收等待和位姿更新间隔，验证两个辅助线程忙碌时关键
+回调仍能推进、NED 重置时旧结果不会发布，并确认搜索、预览和退出功能正常。
 
 调试入口仅接受本地形式的 X11 display（例如 `:1002`），每次动态读取当前 `$DISPLAY`，不会将
 会话编号写入容器配置。脚本用当前图形用户的 Xauthority cookie 创建容器内临时授权文件，
